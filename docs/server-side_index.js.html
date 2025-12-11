@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/index.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/index.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
+import { pool } from "./db.js";
+import { setupServerConnections, testDatabasePipeline, initializeServerLogic } from "./serverConnections.js";
+
+dotenv.config();
+
+// Only allow server to run on Render
+const isRender = process.env.RENDER === 'true' || (process.env.PORT &amp;&amp; process.env.NODE_ENV === 'production');
+if (!isRender) {
+  console.error('❌ This server is configured to run only on Render. Exiting...');
+  console.error('   RENDER:', process.env.RENDER);
+  console.error('   PORT:', process.env.PORT);
+  console.error('   NODE_ENV:', process.env.NODE_ENV);
+  process.exit(1);
+}
+
+const app = express();
+
+// Helper function to parse user agent for device info
+function parseUserAgent(userAgent) {
+  if (!userAgent || userAgent === 'Unknown User-Agent') {
+    return 'Device: Unknown';
+  }
+  
+  let device = 'Desktop';
+  let browser = 'Unknown';
+  let os = 'Unknown';
+  
+  // Detect device type
+  if (/mobile|android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent)) {
+    device = 'Mobile';
+  } else if (/tablet|ipad|playbook|silk/i.test(userAgent)) {
+    device = 'Tablet';
+  }
+  
+  // Detect browser
+  if (/chrome/i.test(userAgent) &amp;&amp; !/edg/i.test(userAgent)) {
+    browser = 'Chrome';
+  } else if (/firefox/i.test(userAgent)) {
+    browser = 'Firefox';
+  } else if (/safari/i.test(userAgent) &amp;&amp; !/chrome/i.test(userAgent)) {
+    browser = 'Safari';
+  } else if (/edg/i.test(userAgent)) {
+    browser = 'Edge';
+  } else if (/opera|opr/i.test(userAgent)) {
+    browser = 'Opera';
+  }
+  
+  // Detect OS
+  if (/windows/i.test(userAgent)) {
+    os = 'Windows';
+  } else if (/macintosh|mac os x/i.test(userAgent)) {
+    os = 'macOS';
+  } else if (/linux/i.test(userAgent)) {
+    os = 'Linux';
+  } else if (/android/i.test(userAgent)) {
+    os = 'Android';
+  } else if (/ios|iphone|ipad|ipod/i.test(userAgent)) {
+    os = 'iOS';
+  }
+  
+  return `Device: ${device} | Browser: ${browser} | OS: ${os}`;
+}
+
+// Request logging middleware - log ALL incoming requests FIRST (before CORS)
+app.use((req, res, next) => {
+  // Log request start
+  const requestType = `${req.method} ${req.path}`;
+  const origin = req.headers.origin || 'No origin';
+  const ip = req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || 'Unknown IP';
+  const userAgent = req.headers['user-agent'] || 'Unknown User-Agent';
+  const deviceInfo = parseUserAgent(userAgent);
+  
+  console.log(`\n📥 [INCOMING] ${requestType}`);
+  console.log(`   From: ${origin} | IP: ${ip} | ${deviceInfo}`);
+  if (Object.keys(req.query).length > 0) {
+    console.log(`   Query:`, req.query);
+  }
+  
+  next();
+});
+
+// Configure CORS with credentials for sessions
+// Allow both Render client URLs and localhost for development
+const allowedOrigins = process.env.CLIENT_URL 
+  ? process.env.CLIENT_URL.split(',').map(url => url.trim())
+  : ['https://team-24-project-3.onrender.com', 'http://localhost:3000', 'http://localhost:3001'];
+
+console.log(`🔧 CORS: ${allowedOrigins.length} allowed origin(s) | NODE_ENV: ${process.env.NODE_ENV || 'not set'}`);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (health checks, server-to-server requests)
+    if (!origin) {
+      return callback(null, true);
+    }
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      // Only log if it's a new origin or in development
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`✅ CORS: ${origin}`);
+      }
+      callback(null, true);
+    } else {
+      console.warn(`❌ CORS blocked: ${origin} (allowed: ${allowedOrigins.join(', ')})`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
+
+// Parse JSON bodies - MUST be before routes
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Debug middleware to check if body parsing worked
+app.use((req, res, next) => {
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    const contentType = req.headers['content-type'] || 'none';
+    if (!req.body || Object.keys(req.body).length === 0) {
+      console.log(`⚠️ Body is empty or undefined for ${req.method} ${req.path}`);
+      console.log(`   Content-Type: ${contentType}`);
+      console.log(`   Body value:`, req.body);
+    }
+  }
+  next();
+});
+
+// Log request body after JSON parsing
+app.use((req, res, next) => {
+  if (req.method !== 'GET' &amp;&amp; req.body &amp;&amp; Object.keys(req.body).length > 0) {
+    // Custom compact formatter for order logs
+    const formatCompact = (obj, indent = 0) => {
+      const pad = '  '.repeat(indent);
+      
+      if (Array.isArray(obj)) {
+        if (obj.length === 0) return '[]';
+        // Check if it's a simple array that can fit on one line
+        const simpleArrayStr = JSON.stringify(obj);
+        if (simpleArrayStr.length &lt; 80 &amp;&amp; !obj.some(item => typeof item === 'object' &amp;&amp; item !== null)) {
+          return simpleArrayStr;
+        }
+        // Complex array - format each item compactly
+        const items = obj.map(item => formatCompact(item, indent + 1));
+        return '[\n' + items.map(item => pad + '  ' + item).join(',\n') + '\n' + pad + ']';
+      }
+      
+      if (obj &amp;&amp; typeof obj === 'object' &amp;&amp; obj !== null) {
+        const keys = Object.keys(obj);
+        if (keys.length === 0) return '{}';
+        
+        // Special handling for lineItems - keep on one line with entrees
+        if (keys.includes('menuID') &amp;&amp; keys.includes('quantity')) {
+          const parts = [];
+          if (obj.menuID !== undefined) parts.push(`menuID: ${obj.menuID}`);
+          if (obj.quantity !== undefined) parts.push(`qty: ${obj.quantity}`);
+          if (obj.entree &amp;&amp; Array.isArray(obj.entree)) {
+            const entreeStr = obj.entree.map(e => 
+              `{menuID: ${e.menuID}, qty: ${e.quantity || 1}}`
+            ).join(', ');
+            parts.push(`entree: [${entreeStr}]`);
+          }
+          return `{ ${parts.join(', ')} }`;
+        }
+        
+        // Regular object - format compactly
+        const pairs = keys.map(key => {
+          const val = obj[key];
+          if (val === null) return `${key}: null`;
+          if (typeof val === 'string') return `${key}: "${val}"`;
+          if (typeof val === 'number' || typeof val === 'boolean') return `${key}: ${val}`;
+          if (Array.isArray(val) || (typeof val === 'object')) {
+            const formatted = formatCompact(val, indent + 1);
+            // If formatted value has newlines, put it on next line
+            if (formatted.includes('\n')) {
+              return `${key}:\n${pad}  ${formatted}`;
+            }
+            return `${key}: ${formatted}`;
+          }
+          return `${key}: ${JSON.stringify(val)}`;
+        });
+        
+        // Small objects on one line
+        const singleLine = `{ ${pairs.join(', ')} }`;
+        if (singleLine.length &lt; 100 &amp;&amp; !singleLine.includes('\n')) {
+          return singleLine;
+        }
+        
+        // Multi-line object
+        return '{\n' + pairs.map(p => pad + '  ' + p).join(',\n') + '\n' + pad + '}';
+      }
+      
+      return JSON.stringify(obj);
+    };
+
+    const bodyStr = typeof req.body === 'object' ? formatCompact(req.body) : String(req.body);
+    const maxLength = 2000;
+    if (bodyStr.length > maxLength) {
+      console.log(`   Body: ${bodyStr.substring(0, maxLength)}... (truncated, ${bodyStr.length} chars total)`);
+    } else {
+      const lines = bodyStr.split('\n');
+      if (lines.length === 1) {
+        console.log(`   Body: ${bodyStr}`);
+      } else {
+        console.log(`   Body:`);
+        lines.forEach(line => console.log(`      ${line}`));
+      }
+    }
+  }
+  next();
+});
+
+// Configure PostgreSQL session store
+const PgSessionStore = connectPgSimple(session);
+
+app.set('trust proxy', 1);
+
+// Configure PostgreSQL session store
+const sessionStore = new PgSessionStore({
+  pool: pool, // Connection pool
+  tableName: 'session', // Use 'session' table
+  createTableIfMissing: true // Automatically create table if it doesn't exist
+});
+
+// Add error handlers to session store to catch any save errors
+sessionStore.on('connect', () => {
+  console.log('✅ Session store connected to PostgreSQL');
+});
+
+sessionStore.on('disconnect', () => {
+  console.log('⚠️ Session store disconnected from PostgreSQL');
+});
+
+sessionStore.on('error', (error) => {
+  console.error('❌ Session store error:', error);
+  console.error('   Error stack:', error.stack);
+});
+
+// Configure session management with PostgreSQL store
+const isProduction = process.env.NODE_ENV === 'production';
+const cookieConfig = {
+  secure: isProduction, // HTTPS in production only
+  httpOnly: true,
+  maxAge: 24 * 60 * 60 * 1000, // 24 hours
+  sameSite: isProduction ? 'none' : 'lax', // 'lax' for localhost, 'none' for cross-origin in production
+  // Don't set domain for localhost - let browser handle it
+  // path: '/' is default, which is correct
+};
+
+// Test cookie configuration on startup
+console.log('🍪 Cookie config - secure:', cookieConfig.secure, 'sameSite:', cookieConfig.sameSite);
+
+
+app.use(session({
+  store: sessionStore,
+  secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
+  resave: true, // Changed to true to ensure session is saved even if not modified
+  saveUninitialized: true, // Changed to true to save new sessions
+  name: 'connect.sid', // Explicit cookie name
+  cookie: cookieConfig
+}));
+
+
+console.log('✅ Session store configured with PostgreSQL');
+const port = process.env.PORT;
+if (!port) {
+  console.error('❌ PORT environment variable is required. Exiting...');
+  process.exit(1);
+}
+
+/**
+ * Initialize server with async startup sequence
+ * 1. Initialize database schema
+ * 2. Setup API endpoints
+ * 3. Start listening
+ * @author Danny
+ */
+async function startServer() {
+  try {
+    // Step 1: Initialize database schema
+    console.log("Initializing server...");
+    await initializeServerLogic();
+    
+    // Step 2: Setup API endpoints
+    setupServerConnections(app);
+    
+    // Step 3: Start listening
+    app.listen(port, async () => {
+      console.log(`✅ Server running at ${port}`);
+
+      try { // tests pipeline of ServerConnections -> ServerLogic -> DatabaseAccess -> DB
+        const ok = await testDatabasePipeline(); 
+        if (ok) console.log("✅ Database-Server pipeline OK");
+        else console.error("❌ Database pipeline reported failure");
+      } 
+      catch (err) { console.error("❌ Server-Database crash:", err); }
+    });
+  } catch (err) {
+    console.error("❌ Failed to start server:", err);
+    process.exit(1);
+  }
+}
+
+// Start the server
+startServer();
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

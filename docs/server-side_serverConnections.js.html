@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/serverConnections.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/serverConnections.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * HTTP route bindings for the API server.
+ *
+ * Responsibilities:
+ * - Initialize application logic and expose endpoints via Express.
+ * - Provide diagnostic endpoints for session/cookie verification.
+ * - Implement report retrieval, schema queries, authentication, and CRUD helpers.
+ * - Validate inputs and forward to logic layer; return structured errors.
+ * - Maintain minimal logging focused on validation and server errors.
+ */
+
+import { ServerLogic } from './serverLogic.js';
+import { verifyGoogleToken, findEmployeeByEmail } from './googleAuth.js';
+import { requireManager, requireAuth } from './authMiddleware.js';
+import { ErrorCodes, getErrorCodeName } from './errorCodes.js';
+
+const logic = new ServerLogic();
+
+export async function testDatabasePipeline() { return logic.getDatabaseStatus(); }
+
+/**
+ * Initialize server logic (load database schema)
+ * MUST be called before setupServerConnections
+ */
+export async function initializeServerLogic() { await logic.initialize(); }
+
+/**
+ * Bind all HTTP endpoints to the provided Express application.
+ *
+ * @param {Object} app - Express application instance.
+ * @returns {void}
+ */
+export function setupServerConnections(app) {
+  // Minimal payload logger for debugging validation errors
+  const logPayload = (req) => {
+    try {
+      const contentType = req.headers['content-type'] || 'none';
+      const body = (req.body &amp;&amp; Object.keys(req.body).length > 0) ? req.body : 'EMPTY';
+      const query = (req.query &amp;&amp; Object.keys(req.query).length > 0) ? req.query : 'EMPTY';
+      console.error('   Payload:', JSON.stringify({ contentType, body, query }));
+    } catch (e) {
+      console.error('   Payload logging failed:', e.message || e);
+    }
+  };
+
+  // Diagnostic endpoint to check session store
+    // Diagnostic endpoint to check session store (keep minimal logs)
+  /**
+   * Diagnostic: set and persist a test value in the session to verify cookie handling.
+   */
+  app.get('/debug/cookie-test', (req, res) => {
+    // Set a test value in the session
+    req.session.testValue = 'cookie-test-' + Date.now();
+    req.session.save((err) => {
+      if (err) {
+        console.error('   ❌ Error saving test session:', err);
+        return res.json({ error: 'Failed to save session', details: err.message });
+      }
+      res.json({
+        success: true,
+        message: 'Cookie test',
+        sessionId: req.sessionID,
+        cookiesReceived: req.headers.cookie || 'NONE',
+        testValue: req.session.testValue,
+        instructions: 'Call this endpoint again - if cookies work, you should see the same sessionId and testValue'
+      });
+    });
+  });
+
+  /**
+   * Diagnostic: list recent sessions from the store for quick inspection.
+   */
+  app.get('/debug/sessions', async (req, res) => {
+    try {
+      const { pool } = await import('./db.js');
+      const result = await pool.query('SELECT sid, expire, sess FROM session ORDER BY expire DESC LIMIT 10');
+      res.json({
+        success: true,
+        sessionCount: result.rows.length,
+        sessions: result.rows.map(row => ({
+          sid: row.sid,
+          expire: row.expire,
+          hasEmployee: row.sess?.employee ? true : false,
+          employee: row.sess?.employee || null
+        }))
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  /**
+   * List active reports available for retrieval.
+   */
+  app.get('/getReportList', (req, res) => {
+  try {
+    const reports = logic.getReportList();
+
+    const activeReports = Object.entries(reports)
+      .filter(([id, r]) => r.active)
+      .map(([id, r]) => ({
+        id: Number(id),
+        name: r.name,
+        description: r.description,
+        active: r.active
+      }));
+
+    res.json({ success: true, reports: activeReports });
+  } 
+  catch (e) {
+    console.error('API Error [GET /getReportList]:', e.message || e);
+    res.status(500).json({ error: e.message || 'An unknown error occurred' });
+  }
+});
+
+  /**
+   * Retrieve a specific report by ID.
+   */
+  app.get('/getReport/:reportId', async (req, res) => {
+    try {
+      const reportId = parseInt(req.params.reportId, 10);
+      
+      if (isNaN(reportId)) {
+        console.error('Validation failed: Report ID must be a number');
+        return res.status(400).json({ 
+          error: 'Report ID must be a number',
+          reportId: req.params.reportId 
+        });
+      }
+
+      const params = req.query || {};
+      const report = await logic.getReport(reportId, params);
+      res.json({ success: true, ...report });
+    } 
+    catch (e) { 
+      const reportId = parseInt(req.params.reportId, 10);
+      console.error(`API Error [GET /getReport/${reportId}]:`, e.message || e);
+      
+      // Use 404 if report not found, otherwise 400 for validation errors, 500 for server errors
+      let statusCode = 500;
+      if (e.message &amp;&amp; e.message.includes('Invalid report ID')) {
+        statusCode = 404;
+      } else if (e.message &amp;&amp; (e.message.includes('Type validation failed') || e.message.includes('must be') || e.message.includes('expects'))) {
+        statusCode = 400;
+      }
+      
+      res.status(statusCode).json({ 
+        error: e.message || 'An unknown error occurred',
+        reportId: isNaN(reportId) ? req.params.reportId : reportId
+      }); 
+    }
+  });
+
+  /**
+   * Get database schema (all tables or a specific table).
+   */
+  app.get('/getTableSchema', async (req, res) => {
+    try {
+      const { table } = req.query; // Optional table parameter
+      const schema = logic.getTableSchema(table || null);
+      res.json({ success: true, schema });
+    } 
+    catch (e) { 
+      console.error('API Error [GET /getTableSchema]:', e.message || e);
+      // Use 404 if table not found, otherwise 500
+      const statusCode = e.message &amp;&amp; (e.message.includes('not found') || e.message.includes('Invalid table')) ? 404 : 500;
+      res.status(statusCode).json({ error: e.message || 'An unknown error occurred' }); 
+    }
+  });
+
+  /**
+   * Validate employee credentials and create a session.
+   */
+  app.post('/validateEmployeeLogin', async (req, res) => {
+    try {
+      const { username, password, role } = req.body;
+      
+      if (!username) {
+        console.error('Validation failed: Username is required');
+        return res.status(400).json({ error: 'Username is required' });
+      }
+      if (!password) {
+        console.error('Validation failed: Password is required');
+        return res.status(400).json({ error: 'Password is required' });
+      }
+      if (role !== 0 &amp;&amp; role !== 1) {
+        console.error('Validation failed: Role must be 0 or 1');
+        return res.status(400).json({ error: 'Role must be 0 (cashier) or 1 (manager)' });
+      }
+
+      const result = await logic.validateEmployeeLogin(username, password, role);
+      
+      // If login successful, create session
+      if (result.success &amp;&amp; result.employee) {
+        // IMPORTANT: Set employee data BEFORE any session operations
+        // This ensures the data is part of the session object
+        req.session.employee = {
+          id: result.employee.id,
+          name: result.employee.name,
+          username: result.employee.username,
+          role: result.employee.role,
+          isActive: result.employee.isActive,
+        };
+        
+        // Force the session to be saved by marking it as modified
+        // Some session stores require explicit modification tracking
+        req.session.touch();
+        
+        // Save the session explicitly and wait for it before sending response
+        // CRITICAL: Use sessionStore.set directly instead of req.session.save()
+        // This ensures we're using the PostgreSQL store directly
+        const sessionDataToSave = {
+          cookie: req.session.cookie,
+          employee: req.session.employee
+        };
+        
+        await new Promise((resolve, reject) => {
+          // Use a callback to ensure save completes
+          // Also set a timeout to catch if save never completes
+          const saveTimeout = setTimeout(() => {
+            console.error('❌ Session save timed out after 5 seconds!');
+            reject(new Error('Session save timeout'));
+          }, 5000);
+          
+          // Try direct sessionStore.set first
+          if (req.sessionStore &amp;&amp; typeof req.sessionStore.set === 'function') {
+            req.sessionStore.set(req.sessionID, sessionDataToSave, (err) => {
+              clearTimeout(saveTimeout);
+              if (err) {
+                console.error('❌ Direct sessionStore.set() FAILED:', err);
+                // Fall back to req.session.save()
+                req.session.save((saveErr) => {
+                  if (saveErr) {
+                    console.error('❌ req.session.save() also FAILED:', saveErr);
+                    reject(saveErr);
+                    return;
+                  }
+                  resolve();
+                });
+                return;
+              }
+              
+              resolve();
+            });
+          } else {
+            // Fall back to req.session.save()
+            req.session.save((err) => {
+              clearTimeout(saveTimeout);
+              if (err) {
+                console.error('❌ Error saving session:', err);
+                reject(err);
+                return;
+              }
+              resolve();
+            });
+          }
+        });
+        
+        // Return session token for API clients (Node.js scripts, etc.)
+        // This allows authentication via Authorization header when cookies don't work
+        result.sessionToken = req.sessionID;
+      }
+      
+      // CRITICAL: Ensure cookie is set by explicitly touching the session
+      // This forces express-session to set the cookie in the response
+      if (result.success &amp;&amp; req.sessionID) {
+        // Force session to be marked as modified so cookie is set
+        req.session.touch();
+      }
+      
+      res.json(result);
+    } 
+    catch (e) { 
+      console.error('API Error [POST /validateEmployeeLogin]:', e.message || e);
+      res.status(500).json({ error: e.message || 'An unknown error occurred' }); 
+    }
+  });
+
+  /**
+   * Authenticate via Google OAuth token and create a session.
+   */
+  app.post('/googleAuth', async (req, res) => {
+    try {
+      const { token } = req.body;
+      
+      if (!token) {
+        console.error('Validation failed: Google token is required');
+        return res.status(400).json({ error: 'Google token is required' });
+      }
+
+      // Verify Google token
+      const googleUser = await verifyGoogleToken(token);
+
+      // Find employee in database by email
+      const employee = await findEmployeeByEmail(googleUser.email, logic);
+      
+      if (!employee) {
+        console.error('Employee not found for email:', googleUser.email);
+        return res.status(404).json({ 
+          success: false,
+          error: 'No employee account found with this email. Please contact your manager.' 
+        });
+      }
+
+      if (!employee.isActive) {
+        console.error('Employee account is inactive:', googleUser.email);
+        return res.status(403).json({ 
+          success: false,
+          error: 'Your account is inactive. Please contact your manager.' 
+        });
+      }
+
+      // Create session
+      req.session.employee = {
+        id: employee.id,
+        name: employee.name,
+        username: employee.username,
+        email: employee.email,
+        role: employee.role,
+        isActive: employee.isActive,
+        googleId: googleUser.googleId,
+      };
+
+      // Touch the session to mark it as modified (required for some session stores)
+      req.session.touch();
+      
+      // Save the session explicitly and wait for it before sending response
+      await new Promise((resolve, reject) => {
+        req.session.save((err) => {
+          if (err) {
+            console.error('❌ Error saving Google auth session:', err);
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+      });
+
+      res.json({
+        success: true,
+        message: 'Login successful',
+        employee: {
+          id: employee.id,
+          name: employee.name,
+          username: employee.username,
+          email: employee.email,
+          role: employee.role,
+          isActive: employee.isActive,
+        },
+        sessionToken: req.sessionID // Also return session token for API clients
+      });
+    } 
+    catch (e) { 
+      console.error('API Error [POST /googleAuth]:', e.message || e);
+      res.status(500).json({ 
+        success: false,
+        error: e.message || 'An unknown error occurred' 
+      }); 
+    }
+  });
+
+  /**
+   * Terminate current session and clear cookie.
+   */
+  app.post('/logout', async (req, res) => {
+    try {
+      req.session.destroy((err) => {
+        if (err) {
+          console.error('❌ Logout error:', err);
+          return res.status(500).json({ error: err.message || 'Logout failed' });
+        }
+        res.clearCookie('connect.sid');
+        res.json({ success: true, message: 'Logged out successfully' });
+      });
+    } catch (e) {
+      console.error('API Error [POST /logout]:', e.message || e);
+      res.status(500).json({ error: e.message || 'An unknown error occurred' });
+    }
+  });
+
+  /**
+   * Check if current session is authenticated.
+   */
+  app.get('/auth/check', async (req, res) => {
+    try {
+      // Removed verbose logging - only log errors
+      if (req.session &amp;&amp; req.session.employee) {
+        res.json({ 
+          authenticated: true, 
+          employee: req.session.employee 
+        });
+      } else {
+        // Only log if there's actually an issue (not just unauthenticated)
+        res.json({ authenticated: false });
+      }
+    }     catch (e) { 
+      console.error('API Error [GET /auth/check]:', e.message || e);
+      res.status(500).json({ error: e.message || 'An unknown error occurred' });
+    }
+  });
+
+  // Order Create request endpoint - PUBLIC (no authentication required for kiosk/customer use)
+  /**
+   * Create a new order (public kiosk/customer endpoint).
+   */
+  app.post('/createOrder', async (req, res) => {
+    try {
+      // Validate email if provided - must be text (string) or empty
+      if (req.body.email !== undefined &amp;&amp; req.body.email !== null &amp;&amp; req.body.email !== '') {
+        if (typeof req.body.email !== 'string') {
+          console.error('❌ Validation failed: Email must be text (string) or empty');
+          return res.status(400).json({ 
+            success: false,
+            error: 'Email must be text (string) or empty' 
+          });
+        }
+      }
+      
+      const order = await logic.createOrder(req.body);
+      res.json({ 
+        success: true, 
+        orderID: order.orderID, 
+        customerID: order.customerID || null,
+        pointsAwarded: order.pointsAwarded || 0,
+        customerPointsTotal: order.customerPointsTotal ?? null,
+        emailAttempted: !!order.emailAttempted,
+        emailPending: !!order.emailPending,
+        emailSent: !!order.emailSent,
+        order 
+      });
+    } 
+    catch (e) { 
+      console.error('API Error [POST /createOrder]:', e.message || e);
+      // Return error with success: false for consistency
+      const statusCode = e.message &amp;&amp; (e.message.includes('Email') || e.message.includes('Order object') || e.message.includes('lineItems')) ? 400 : 500;
+      res.status(statusCode).json({ 
+        success: false,
+        error: e.message || 'An unknown error occurred' 
+      }); 
+    }
+  });
+
+  /**
+   * Generic table query: select columns or by id.
+   */
+  app.post('/genericTableGet', async (req, res) => {
+    try {
+      const { table, columns = [], id = null } = req.body;
+      
+      if (!table) {
+        console.error('❌ Validation failed: Table parameter is required');
+        return res.status(400).json({ error: 'Table parameter is required' });
+      }
+
+      const data = await logic.genericTableGet(table, columns, id);
+      res.json({ success: true, data });
+    } 
+    catch (e) { 
+      console.error('API Error [POST /genericTableGet]:', e.message || e);
+      // Use 404 if table/column not found, otherwise 500
+      const statusCode = e.message &amp;&amp; e.message.includes('not found') ? 404 : 500;
+      res.status(statusCode).json({ error: e.message || 'An unknown error occurred' }); 
+    }
+  });
+
+  /**
+   * Generic table update: set a column value by id (requires auth).
+   */
+  app.post('/genericTableSet', requireAuth, async (req, res) => {
+    try {
+      const { table, column, value, id } = req.body;
+      
+      if (!table) {
+        console.error('❌ Validation failed: Table parameter is required');
+        return res.status(400).json({ error: 'Table parameter is required' });
+      }
+      if (!column) {
+        console.error('❌ Validation failed: Column parameter is required');
+        return res.status(400).json({ error: 'Column parameter is required' });
+      }
+      if (id === null || id === undefined) {
+        console.error('❌ Validation failed: ID parameter is required');
+        return res.status(400).json({ error: 'ID parameter is required' });
+      }
+      if (value === null || value === undefined) {
+        console.error('❌ Validation failed: Value parameter is required');
+        return res.status(400).json({ error: 'Value parameter is required' });
+      }
+
+      const data = await logic.genericTableSet(table, column, value, id);
+      res.json({ success: true, data });
+    } 
+    catch (e) { 
+      console.error('API Error [POST /genericTableSet]:', e.message || e);
+      // Use 404 if table/column not found, otherwise 500
+      const statusCode = e.message &amp;&amp; (e.message.includes('Invalid table') || e.message.includes('Invalid column') || e.message.includes('not found')) ? 404 : 500;
+      res.status(statusCode).json({ error: e.message || 'An unknown error occurred' }); 
+    }
+  });
+
+
+  /**
+   * Generic table create: insert a row with type validation (requires auth).
+   */
+  app.post('/genericTableCreate', requireAuth, async (req, res) => {
+    try {
+      const { table, values } = req.body;
+      
+      if (!table) {
+        const errorCode = ErrorCodes.VAL_MISSING_TABLE;
+        const error = '[VALIDATION] Table parameter is required';
+        console.error(`❌ Validation failed: ${error}`);
+        return res.status(400).json({ 
+          success: false,
+          error,
+          errorCode,
+          errorCodeName: getErrorCodeName(errorCode),
+          errorType: 'VALIDATION',
+          details: 'The "table" field is required in the request body'
+        });
+      }
+      if (!values || typeof values !== 'object' || Array.isArray(values)) {
+        const errorCode = ErrorCodes.VAL_INVALID_VALUES;
+        const error = '[VALIDATION] Values parameter is required and must be an object';
+        console.error(`❌ Validation failed: ${error}`);
+        return res.status(400).json({ 
+          success: false,
+          error,
+          errorCode,
+          errorCodeName: getErrorCodeName(errorCode),
+          errorType: 'VALIDATION',
+          details: `The "values" field must be an object with column-value pairs (got: ${typeof values}${Array.isArray(values) ? ' (array)' : ''})`
+        });
+      }
+
+      const data = await logic.genericTableCreate(table, values);
+      res.json({ success: true, data });
+    } 
+    catch (e) { 
+      // Extract error code and type from error object
+      const errorCode = e.errorCode || 'UNKNOWN_ERROR';
+      const errorType = e.errorType || (e.message &amp;&amp; e.message.startsWith('[VALIDATION]') ? 'VALIDATION' : 
+                                        e.message &amp;&amp; e.message.startsWith('[DATABASE]') ? 'DATABASE' : 'UNKNOWN');
+      
+      // Determine status code based on error type
+      let statusCode = 500;
+      if (errorType === 'VALIDATION' || e.message?.startsWith('[VALIDATION]')) {
+        statusCode = 400;
+      } else if (e.message &amp;&amp; (e.message.includes('does not exist') || e.message.includes('not found'))) {
+        statusCode = 404;
+      } else if (errorType === 'DATABASE' || e.message?.startsWith('[DATABASE]')) {
+        // Database errors - check for specific constraint violations
+        if (errorCode === ErrorCodes.DB_UNIQUE_VIOLATION || e.message?.includes('Duplicate entry') || e.message?.includes('already exists')) {
+          statusCode = 409; // Conflict
+        } else if (errorCode === ErrorCodes.DB_NOT_NULL_VIOLATION || e.message?.includes('NOT NULL') || e.message?.includes('required')) {
+          statusCode = 400; // Bad Request
+        } else {
+          statusCode = 500; // Internal Server Error
+        }
+      }
+      
+      // Log error
+      console.error(`API Error [POST /genericTableCreate]:`, e.message || 'An unknown error occurred');
+      if (e.dbCode) {
+        console.error(`   PostgreSQL Code: ${e.dbCode} | Constraint: ${e.dbConstraint || 'N/A'} | Column: ${e.dbColumn || 'N/A'}`);
+      }
+      
+      // Build response object with all error information
+      const errorResponse = { 
+        success: false,
+        error: e.message || 'An unknown error occurred',
+        errorCode,
+        errorCodeName: getErrorCodeName(errorCode),
+        errorType,
+        details: e.message || 'No additional details available'
+      };
+      
+      // Include database-specific error details if available
+      if (e.dbCode) {
+        errorResponse.dbCode = e.dbCode;
+      }
+      if (e.dbDetail) {
+        errorResponse.dbDetail = e.dbDetail;
+      }
+      if (e.dbHint) {
+        errorResponse.dbHint = e.dbHint;
+      }
+      if (e.dbConstraint) {
+        errorResponse.dbConstraint = e.dbConstraint;
+      }
+      if (e.dbColumn) {
+        errorResponse.dbColumn = e.dbColumn;
+      }
+      
+      res.status(statusCode).json(errorResponse); 
+    }
+  });
+
+  app.post('/employeeMove', requireAuth, async (req, res) => {
+  try {
+    const { id, role } = req.body;
+
+    // Remove table validation since server logic handles it
+    const movedEmployee = await logic.employeeMove(id, role);
+    
+    res.json({ success: true, data: movedEmployee });
+  } catch (err) {
+    console.error('❌ employeeMove failed:', err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
+
+  /**
+   * Generic table delete: remove rows matching column=value.
+   * Dev-only auth bypass permitted in development/test contexts.
+   */
+  app.post('/genericTableDelete', async (req, res) => {
+    try {
+      const devBypass = (process.env.NODE_ENV === 'development') || (process.env.DEV_TEST_NO_AUTH === 'true') || (req.headers['x-dev-bypass'] === '1');
+      const isAuthenticated = req.session &amp;&amp; req.session.employee;
+      if (!devBypass &amp;&amp; !isAuthenticated) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      const { table, column, value } = req.body;
+
+      if (!table) {
+        return res.status(400).json({ error: 'Table parameter is required' });
+      }
+      if (!column) {
+        return res.status(400).json({ error: 'Column parameter is required' });
+      }
+      if (value === undefined) {
+        return res.status(400).json({ error: 'Value parameter is required' });
+      }
+
+      const deleted = await logic.genericTableDelete(table, column, value);
+      res.json({ success: true, deleted });
+    } catch (e) {
+      console.error('API Error [POST /genericTableDelete]:', e.message || e);
+      const statusCode = e.message &amp;&amp; (e.message.includes('Invalid table') || e.message.includes('Invalid column')) ? 404 : 500;
+      res.status(statusCode).json({ error: e.message || 'An unknown error occurred' });
+    }
+  });
+
+  /**
+   * Retrieve incomplete order details by ID (body or query).
+   */
+  app.post('/getIncompleteOrderById', async (req, res) => {
+    try {
+      // Accept orderId from body or query for flexibility
+      const rawOrderId = (req.body &amp;&amp; req.body.orderId !== undefined) ? req.body.orderId : req.query?.orderId;
+      // Coerce to number if string provided
+      const parsed = Number(rawOrderId);
+      if (!Number.isFinite(parsed)) {
+        throw new Error('orderId parameter is required');
+      }
+      const order = await logic.getIncompleteOrderById(parsed);
+      res.json({ success: true, order });
+    } 
+    catch (e) { 
+      console.error('API Error [POST /getIncompleteOrderById]:', e.message || e);
+      logPayload(req);
+      const statusCode = e.message &amp;&amp; (e.message.includes('Invalid table') || e.message.includes('not found')) ? 404 : 400;
+      res.status(statusCode).json({ error: e.message || 'An unknown error occurred' }); 
+    }
+  });
+
+
+}
+
+
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

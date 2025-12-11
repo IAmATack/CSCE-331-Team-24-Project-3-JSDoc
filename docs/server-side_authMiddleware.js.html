@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/authMiddleware.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/authMiddleware.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Authentication and authorization middleware.
+ *
+ * Responsibilities:
+ * - Guard routes that require a logged-in session.
+ * - Enforce role-based access checks for privileged endpoints.
+ * - Return 401/403 with concise error messages on failure.
+ */
+/**
+ * Authentication and Authorization Middleware
+ * Validates that requests come from authenticated managers or cashiers
+ */
+import { ErrorCodes, getErrorCodeName } from './errorCodes.js';
+/**
+ * Authentication and authorization middleware.
+ *
+ * Responsibilities:
+ * - Enforce session presence and optional role checks.
+ * - Return consistent error payloads with codes and messages.
+ */
+
+/**
+ * Middleware to check if user is authenticated (logged in)
+ * Supports both cookie-based sessions and token-based authentication via Authorization header
+ * @param {Request} req - Express request object
+ * @param {Response} res - Express response object
+ * @param {Function} next - Express next middleware function
+ */
+export async function requireAuth(req, res, next) {
+  /**
+   * Require an authenticated session or token.
+   * Attaches user context to the request when available.
+   * @param {Request} req
+   * @param {Response} res
+   * @param {Function} next
+   */
+  const requestPath = `${req.method} ${req.path}`;
+  
+  // If session exists but employee is missing, try to reload from store
+  if (req.session &amp;&amp; !req.session.employee &amp;&amp; req.sessionStore &amp;&amp; typeof req.sessionStore.get === 'function') {
+    req.sessionStore.get(req.sessionID, (err, session) => {
+      if (!err &amp;&amp; session &amp;&amp; session.employee) {
+        req.session.employee = session.employee;
+        // Only log session reloads as they're infrequent and indicate a potential issue
+        console.log(`✅ [AUTH] Session reloaded for ${requestPath} - User: ${session.employee.username || session.employee.email}`);
+      }
+      continueAuth();
+    });
+    return;
+  }
+  
+  function continueAuth() {
+    // Check if session exists (cookie-based auth)
+    if (req.session &amp;&amp; req.session.employee) {
+      if (!req.session.employee.isActive) {
+        console.error(`❌ [AUTH] Inactive account attempted ${requestPath} - User: ${req.session.employee.username || req.session.employee.email}`);
+        return res.status(403).json({ 
+          error: 'Your account is inactive. Please contact your manager.',
+          errorCode: ErrorCodes.AUTH_ACCOUNT_INACTIVE_COOKIE,
+          errorCodeName: 'AUTH_ACCOUNT_INACTIVE_COOKIE',
+          authenticated: false 
+        });
+      }
+      // Removed verbose success logging - only log failures
+      return next();
+    }
+
+    // Check for token-based auth via Authorization header
+    const authHeader = req.headers.authorization;
+    if (authHeader &amp;&amp; authHeader.startsWith('Bearer ')) {
+      const sessionToken = authHeader.substring(7);
+      // Removed verbose attempt logging - only log failures
+      
+      try {
+        const sessionStore = req.sessionStore;
+        if (sessionStore &amp;&amp; typeof sessionStore.get === 'function') {
+          sessionStore.get(sessionToken, (err, session) => {
+            if (err || !session || !session.employee) {
+              console.error(`❌ [AUTH] Token auth failed for ${requestPath} - ${err ? 'Error: ' + err.message : 'Session not found or no employee data'}`);
+              const errorCode = err ? ErrorCodes.AUTH_SESSION_EXPIRED : ErrorCodes.AUTH_TOKEN_INVALID;
+              return res.status(401).json({ 
+                error: 'Authentication required. Please log in.',
+                errorCode,
+                errorCodeName: getErrorCodeName(errorCode),
+                authenticated: false 
+              });
+            }
+            
+            if (!session.employee.isActive) {
+              console.error(`❌ [AUTH] Inactive account attempted ${requestPath} - User: ${session.employee.username || session.employee.email}`);
+              return res.status(403).json({ 
+                error: 'Your account is inactive. Please contact your manager.',
+                errorCode: ErrorCodes.AUTH_ACCOUNT_INACTIVE_TOKEN,
+                errorCodeName: 'AUTH_ACCOUNT_INACTIVE_TOKEN',
+                authenticated: false 
+              });
+            }
+            
+            req.session = session;
+            req.sessionID = sessionToken;
+            // Removed verbose success logging - only log failures
+            return next();
+          });
+          return;
+        }
+      } catch (error) {
+        console.error(`❌ [AUTH] Token auth error for ${requestPath}:`, error.message);
+        // Fall through to 401
+      }
+    } else {
+      console.error(`❌ [AUTH] No authentication found for ${requestPath}`);
+      console.error(`   Session exists: ${!!req.session}`);
+      console.error(`   Session has employee: ${!!(req.session &amp;&amp; req.session.employee)}`);
+      console.error(`   Authorization header: ${authHeader ? 'Present' : 'Missing'}`);
+      console.error(`   Cookies: ${req.headers.cookie || 'None'}`);
+    }
+
+    // No valid authentication found
+    return res.status(401).json({ 
+      error: 'Authentication required. Please log in.',
+      errorCode: ErrorCodes.AUTH_NO_SESSION,
+      errorCodeName: 'AUTH_NO_SESSION',
+      authenticated: false 
+    });
+  }
+  
+  continueAuth();
+}
+
+/**
+ * Middleware to check if user is a manager
+ * Must be used after requireAuth
+ */
+/**
+ * Require manager role for protected endpoints.
+ * @param {Request} req
+ * @param {Response} res
+ * @param {Function} next
+ */
+export function requireManager(req, res, next) {
+  /**
+   * Ensure the caller has manager privileges.
+   * @param {Request} req
+   * @param {Response} res
+   * @param {Function} next
+   */
+  if (!req.session || !req.session.employee) {
+    return res.status(401).json({ 
+      error: 'Authentication required',
+      errorCode: ErrorCodes.AUTH_REQUIRED,
+      errorCodeName: 'AUTH_REQUIRED',
+      authenticated: false 
+    });
+  }
+
+  if (req.session.employee.role !== 'manager') {
+    console.log(`❌ Authorization failed: ${req.session.employee.username || req.session.employee.email} attempted manager-only operation`);
+    return res.status(403).json({ 
+      error: 'Manager access required. This operation is restricted to managers only.',
+      errorCode: ErrorCodes.AUTH_NOT_MANAGER,
+      errorCodeName: 'AUTH_NOT_MANAGER',
+      authenticated: true,
+      authorized: false
+    });
+  }
+
+  // Removed verbose success logging - only log failures
+  next();
+}
+
+/**
+ * Middleware to check if user is a cashier
+ * Must be used after requireAuth
+ */
+/**
+ * Require cashier role for protected endpoints.
+ * @param {Request} req
+ * @param {Response} res
+ * @param {Function} next
+ */
+export function requireCashier(req, res, next) {
+  /**
+   * Ensure the caller has cashier privileges.
+   * @param {Request} req
+   * @param {Response} res
+   * @param {Function} next
+   */
+  if (!req.session || !req.session.employee) {
+    return res.status(401).json({ 
+      error: 'Authentication required',
+      errorCode: ErrorCodes.AUTH_REQUIRED,
+      errorCodeName: 'AUTH_REQUIRED',
+      authenticated: false 
+    });
+  }
+
+  if (req.session.employee.role !== 'cashier') {
+    console.log(`❌ Authorization failed: ${req.session.employee.username || req.session.employee.email} attempted cashier-only operation`);
+    return res.status(403).json({ 
+      error: 'Cashier access required. This operation is restricted to cashiers only.',
+      errorCode: ErrorCodes.AUTH_NOT_CASHIER,
+      errorCodeName: 'AUTH_NOT_CASHIER',
+      authenticated: true,
+      authorized: false
+    });
+  }
+
+  // Removed verbose success logging - only log failures
+  next();
+}
+
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

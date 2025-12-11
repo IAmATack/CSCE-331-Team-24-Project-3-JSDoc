@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/clientConnection.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/clientConnection.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Simple client-side connection helper to call the server endpoints.
+ * Exports a ClientConnection class and a default instance.
+ * Methods: getMenu(), getCashiers(), createOrder(order)
+ */
+
+export class ClientConnection {
+  constructor(baseUrl) {
+    // Always use Render server by default
+    const RENDER_URL = 'https://team-24-project-3-1.onrender.com';
+    
+    let defaultBase;
+    
+    // Priority 1: Explicit baseUrl parameter
+    if (baseUrl) {
+      defaultBase = baseUrl;
+    }
+    // Priority 2: localStorage override (for testing - set localStorage.setItem('API_BASE_URL', 'https://...'))
+    else if (typeof window !== 'undefined' &amp;&amp; window.localStorage) {
+      const storedBase = window.localStorage.getItem('API_BASE_URL');
+      if (storedBase) {
+        defaultBase = storedBase;
+      }
+    }
+    
+    // Priority 3: Environment variable (set at build time in Create React App)
+    if (!defaultBase &amp;&amp; typeof process !== 'undefined' &amp;&amp; process.env &amp;&amp; process.env.REACT_APP_API_BASE) {
+      defaultBase = process.env.REACT_APP_API_BASE;
+    }
+    
+    // Priority 4: Default to Render URL
+    if (!defaultBase) {
+      defaultBase = RENDER_URL;
+    }
+    
+    this.base = (baseUrl || defaultBase).replace(/\/+$|\s+/g, ''); // trim trailing slashes/spaces
+    // Initialize employee ID; in Node, default to 1
+    if (typeof window !== 'undefined' &amp;&amp; window.localStorage) {
+      this.id = window.localStorage.getItem('employeeID') || 1;
+    } else {
+      this.id = 1;
+    }
+    // Cookie storage for Node.js environment (browsers handle cookies automatically)
+    this.cookies = new Map();
+    this.isNode = typeof window === 'undefined' &amp;&amp; typeof process !== 'undefined';
+    // Session token for API authentication when cookies don't work
+    // Try to load from localStorage first (persists across page reloads)
+    if (typeof window !== 'undefined' &amp;&amp; window.localStorage) {
+      this.sessionToken = window.localStorage.getItem('sessionToken') || null;
+      if (this.sessionToken) {
+        console.log('🔑 Loaded session token from localStorage');
+      }
+    } else {
+      this.sessionToken = null;
+    }
+    
+    // Log the detected base URL for debugging
+    console.log('🔧 ClientConnection initialized:');
+    console.log('   Base URL:', this.base);
+    if (typeof window !== 'undefined' &amp;&amp; window.localStorage &amp;&amp; window.localStorage.getItem('API_BASE_URL')) {
+      console.log('   ⚠️ Using localStorage override:', window.localStorage.getItem('API_BASE_URL'));
+    }
+  }
+
+  async request(path, { method = 'GET', headers = {}, body, timeoutMs = 30000 } = {}) {
+    // universal fetch wrapper
+    const fullPath = path.startsWith('http://') || path.startsWith('https://')
+      ? path
+      : `${this.base}${path.startsWith('/') ? '' : '/'}${path}`;
+
+    console.log(`🌐 Making ${method} request to: ${fullPath}`);
+    if (body) {
+      console.log(`📦 Request body:`, typeof body === 'string' ? body : JSON.stringify(body));
+    }
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    
+    // Build headers with cookies for Node.js environment
+    const requestHeaders = { 'Accept': 'application/json', ...headers };
+    
+    // Use session token if available (works in both Node.js and browser environments)
+    // This is a fallback when cookies don't work or for cross-origin scenarios
+    if (this.sessionToken) {
+      requestHeaders['Authorization'] = `Bearer ${this.sessionToken}`;
+      console.log(`🔑 Using session token for authentication`);
+    }
+    
+    // In Node.js, manually handle cookies since fetch doesn't persist them automatically
+    if (this.isNode &amp;&amp; this.cookies.size > 0) {
+      const cookieString = Array.from(this.cookies.entries())
+        .map(([name, value]) => `${name}=${value}`)
+        .join('; ');
+      requestHeaders['Cookie'] = cookieString;
+      console.log(`🍪 Sending cookies: ${cookieString.substring(0, 50)}...`);
+    }
+    
+    const opts = {
+      method,
+      headers: requestHeaders,
+      credentials: 'include', // Include cookies for session management (browser)
+      signal: controller ? controller.signal : undefined
+    };
+
+    if (body !== undefined) {
+      opts.body = typeof body === 'string' ? body : JSON.stringify(body);
+      opts.headers['Content-Type'] = opts.headers['Content-Type'] || 'application/json';
+    }
+
+    let timer;
+    // timer controller to abort fetch after timeoutMs
+    try {
+      if (controller) timer = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(fullPath, opts);
+      if (timer) clearTimeout(timer);
+
+      // Extract and store cookies from response (Node.js only)
+      if (this.isNode &amp;&amp; res.headers) {
+        let setCookieHeader = null;
+        let cookiesArray = [];
+        
+        // Method 1: Try getSetCookie() - Node.js 18+ native fetch
+        if (typeof res.headers.getSetCookie === 'function') {
+          try {
+            cookiesArray = res.headers.getSetCookie();
+            if (cookiesArray &amp;&amp; cookiesArray.length > 0) {
+              console.log('🍪 Extracted', cookiesArray.length, 'cookie(s) via getSetCookie()');
+            }
+          } catch (e) {
+            console.log('⚠️ getSetCookie() failed:', e.message);
+          }
+        }
+        
+        // Method 2: Try accessing raw headers (undici format)
+        if (cookiesArray.length === 0 &amp;&amp; res.headers.raw) {
+          try {
+            const rawSetCookie = res.headers.raw['set-cookie'];
+            if (rawSetCookie) {
+              cookiesArray = Array.isArray(rawSetCookie) ? rawSetCookie : [rawSetCookie];
+              console.log('🍪 Extracted', cookiesArray.length, 'cookie(s) via raw headers');
+            }
+          } catch (e) {
+            console.log('⚠️ raw headers access failed:', e.message);
+          }
+        }
+        
+        // Method 3: Try get() method (may return comma-separated string)
+        if (cookiesArray.length === 0 &amp;&amp; typeof res.headers.get === 'function') {
+          try {
+            setCookieHeader = res.headers.get('set-cookie');
+            if (setCookieHeader) {
+              // Split by comma, but be careful - cookies can have commas in values
+              // Simple approach: split and parse each
+              cookiesArray = [setCookieHeader];
+              console.log('🍪 Extracted cookie via get()');
+            }
+          } catch (e) {
+            console.log('⚠️ get() method failed:', e.message);
+          }
+        }
+        
+        // Parse and store cookies
+        if (cookiesArray.length > 0) {
+          for (const cookie of cookiesArray) {
+            if (typeof cookie === 'string') {
+              // Parse cookie: name=value; path=/; httpOnly; ...
+              // Handle both full cookie string and just name=value
+              const parts = cookie.split(';');
+              const nameValue = parts[0].trim();
+              const match = nameValue.match(/^([^=]+)=(.+)$/);
+              if (match) {
+                const [, name, value] = match;
+                this.cookies.set(name.trim(), value.trim());
+                console.log(`🍪 Stored cookie: ${name.trim()}=${value.trim().substring(0, 30)}...`);
+              }
+            }
+          }
+        } else if (this.isNode) {
+          console.log('⚠️ No Set-Cookie header found. Available headers:');
+          // Debug: log all header names
+          if (res.headers &amp;&amp; typeof res.headers.forEach === 'function') {
+            const headerNames = [];
+            res.headers.forEach((value, key) => {
+              headerNames.push(key);
+            });
+            console.log('   Headers:', headerNames.join(', '));
+          } else if (res.headers &amp;&amp; typeof res.headers.keys === 'function') {
+            const headerNames = Array.from(res.headers.keys());
+            console.log('   Headers:', headerNames.join(', '));
+          }
+        }
+      }
+
+      const contentType = res.headers.get &amp;&amp; res.headers.get('content-type');
+      const text = await res.text();
+
+      let data;
+      if (contentType &amp;&amp; contentType.includes('application/json')) {
+        try { data = JSON.parse(text); } catch (e) { data = text; }
+      } else {
+        data = text;
+      }
+
+      if (!res.ok) {
+        const err = new Error(`Request failed ${res.status} ${res.statusText}`);
+        err.status = res.status;
+        err.body = data;
+        throw err;
+      }
+
+      return data;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        const timeoutErr = new Error(`Request timed out after ${timeoutMs}ms to ${fullPath}`);
+        timeoutErr.name = 'TimeoutError';
+        throw timeoutErr;
+      }
+      
+      // Handle network errors (CORS, connection refused, etc.)
+      if (err instanceof TypeError &amp;&amp; err.message.includes('fetch')) {
+        const networkErr = new Error(
+          `Network error: Failed to connect to ${fullPath}. ` +
+          `This could be due to CORS, server being down, or network issues. ` +
+          `Original error: ${err.message}`
+        );
+        networkErr.name = 'NetworkError';
+        networkErr.originalError = err;
+        networkErr.url = fullPath;
+        throw networkErr;
+      }
+      
+      // Re-throw other errors as-is
+      throw err;
+    }
+  }
+
+  async setID(id){
+    this.id = id;
+    console.log(`✅ Client ID set to ${id}`)
+    if (typeof window !== 'undefined' &amp;&amp; window.localStorage) {
+      window.localStorage.setItem('employeeID', `${id}`);
+    }
+  }
+
+  async getID(id){
+    return this.id;
+  }
+
+
+
+  // High-level helpers
+
+  /**
+   * Get list of all available reports
+   * @returns {Promise&lt;Object>} Map of report IDs to their names and descriptions
+   * 
+   * @example
+   * const reports = await client.getReportList();
+   * // Returns:
+   * // {
+   * //   1: { name: 'Total Sales', description: 'Total revenue from all orders', active:true },
+   * //   2: { name: 'Cashier Weekly Pay', description: 'Weekly pay for active cashiers', active:true },
+   * //   ...
+   * // }
+   */
+  async getReportList() {
+    try {
+      console.log('🔄 API Call: getReportList()');
+      const data = await this.request('/getReportList', { method: 'GET' });
+      console.log('✅ API Success: getReportList()');
+      return data &amp;&amp; data.reports ? data.reports : data;
+    } catch (err) {
+      console.error('❌ API Failed: getReportList()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Get report data by report ID
+   * @param {number} reportId - Report ID to retrieve (REQUIRED)
+   * @param {Object} [params={}] - Optional parameters for the report
+   * @returns {Promise&lt;Object>} Report data with metadata
+   * 
+   * @example
+   * // Get total sales report (Report ID 1)
+   * const report = await client.getReport(1);
+   * // Returns:
+   * // {
+   * //   success: true,
+   * //   reportId: 1,
+   * //   reportName: 'Total Sales',
+   * //   description: 'Total revenue from all orders',
+   * //   data: [{ totalrevenue: '123456.78' }]
+   * // }
+   * 
+   * // Get top ten menu items (Report ID 15)
+   * const topItems = await client.getReport(15);
+   */
+  async getReport(reportId, params = {}) {
+    try {
+      console.log('🔄 API Call: getReport()');
+      if (typeof reportId !== 'number') {
+        throw new Error('Report ID must be a number');
+      }
+      
+      const queryParams = Object.keys(params).length > 0
+        ? '?' + new URLSearchParams(params).toString()
+        : '';
+      
+      const data = await this.request(`/getReport/${reportId}${queryParams}`, { method: 'GET' });
+      console.log('✅ API Success: getReport()');
+      return data;
+    } catch (err) {
+      console.error('❌ API Failed: getReport()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Get database schema information
+   * @param {string|null} [table=null] - Optional table name to get schema for specific table (null = all tables)
+   * @returns {Promise&lt;Object>} Schema information with columns and data types
+   * 
+   * @example
+   * // Get all table schemas
+   * const allSchemas = await client.getTableSchema();
+   * // Returns: { cashiers: { columns: [{ name: 'id', type: 'integer' }, ...] }, ... }
+   * 
+   * // Get specific table schema
+   * const cashierSchema = await client.getTableSchema('cashiers');
+   * // Returns: { table: 'cashiers', columns: [{ name: 'id', type: 'integer' }, ...] }
+   */
+  async getTableSchema(table = null) {
+    try {
+      console.log('🔄 API Call: getTableSchema()');
+      const queryParam = table ? `?table=${encodeURIComponent(table)}` : '';
+      const data = await this.request(`/getTableSchema${queryParam}`, { method: 'GET' });
+      console.log('✅ API Success: getTableSchema()');
+      return data &amp;&amp; data.schema ? data.schema : data;
+    } catch (err) {
+      console.error('❌ API Failed: getTableSchema()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Create a new order
+   * @param {Object} order - Order object as described by server logic
+   * @param {string} [email] - Optional email address for receipt
+   * @param {boolean} [wantsReceiptEmail=false] - Whether the customer wants to receive receipt via email
+   * @returns {Promise&lt;Object>} Order creation result with orderID
+   */
+  async createOrder(order, email = null, wantsReceiptEmail = false) {
+    try {
+      console.log('🔄 API Call: createOrder()');
+      // Accepts order object as described by server logic
+      // Include email and wantsReceiptEmail in the request body
+      const requestBody = {
+        ...order,
+        ...(email &amp;&amp; { email }),
+        // Preserve flag from order if present; otherwise use param
+        wantsReceiptEmail:
+          order &amp;&amp; Object.prototype.hasOwnProperty.call(order, 'wantsReceiptEmail')
+            ? Boolean(order.wantsReceiptEmail)
+            : Boolean(wantsReceiptEmail)
+      };
+      const data = await this.request('/createOrder', { method: 'POST', body: requestBody });
+      // server returns { success: true, orderID, order }
+      console.log('✅ API Success: createOrder()');
+      return data;
+    } catch (err) {
+      console.error('❌ API Failed: createOrder()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Generic table query method
+   * @param {Object} options - Query options
+   * @param {string} options.table - Table name to query (REQUIRED)
+   * @param {string[]} [options.columns=[]] - Array of column names (empty = all columns)
+   * @param {number|string|null} [options.id=null] - Optional ID to filter by specific row (null = all rows)
+   * @returns {Promise&lt;Array>} Query results
+   */
+  async genericTableGet({ table, columns = [], id = null }) {
+    try {
+      console.log('🔄 API Call: genericTableGet()');
+      const data = await this.request('/genericTableGet', {
+        method: 'POST',
+        body: { table, columns, id }
+      });
+      console.log('✅ API Success: genericTableGet()');
+      return data &amp;&amp; data.data ? data.data : data;
+    } catch (err) {
+      console.error('❌ API Failed: genericTableGet()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Generic table update method with type validation
+   * @param {Object} options - Update options
+   * @param {string} options.table - Table name to update (REQUIRED)
+   * @param {string} options.column - Column name to update (REQUIRED)
+   * @param {any} options.value - New value for the column (REQUIRED, must match column data type)
+   * @param {number|string} options.id - ID of the row to update (REQUIRED)
+   * @returns {Promise&lt;Object>} Updated row
+   * @throws {Error} If value type doesn't match the database column type
+   */
+  async genericTableSet({ table, column, value, id }) {
+    try {
+      console.log('🔄 API Call: genericTableSet()');
+      console.log('   Parameters:', { table, column, value, id });
+      
+      if (!table) {
+        console.error('❌ Validation Error: table parameter is required');
+        throw new Error('table parameter is required');
+      }
+      if (!column) {
+        console.error('❌ Validation Error: column parameter is required');
+        throw new Error('column parameter is required');
+      }
+      if (value === null || value === undefined) {
+        console.error('❌ Validation Error: value parameter is required');
+        throw new Error('value parameter is required');
+      }
+      if (id === null || id === undefined) {
+        console.error('❌ Validation Error: id parameter is required');
+        throw new Error('id parameter is required');
+      }
+      
+      const data = await this.request('/genericTableSet', {
+        method: 'POST',
+        body: { table, column, value, id }
+      });
+      console.log('✅ API Success: genericTableSet()');
+      return data &amp;&amp; data.data ? data.data : data;
+    } catch (err) {
+      console.error('❌ API Failed: genericTableSet()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Generic table create method - inserts a new row with type validation
+   * 
+   * @param {Object} options - Create options
+   * @param {string} options.table - Table name to insert into (REQUIRED)
+   * @param {Object} options.values - Object with column-value pairs (REQUIRED)
+   * @returns {Promise&lt;Object>} Created row with generated ID
+   * @throws {Error} If any value type doesn't match the expected database column type
+   */ 
+
+  async genericTableCreate({ table, values }) {
+    try {
+      console.log('🔄 API Call: genericTableCreate()');
+      const data = await this.request('/genericTableCreate', {
+        method: 'POST',
+        body: { table, values }
+      });
+      console.log('✅ API Success: genericTableCreate()');
+      return data &amp;&amp; data.data ? data.data : data;
+    } catch (err) {
+      console.error('❌ API Failed: genericTableCreate()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Generic table move method - inserts a new row with type validation
+   * 
+   * @param {Object} options - Create options
+   * @param {string} options.table - Table name to move into (REQUIRED)
+   * @param {Object} options.values - Object with column-value pairs (REQUIRED)
+   * @returns {Promise&lt;Object>} Created row with generated ID
+   * @throws {Error} If any value type doesn't match the expected database column type
+   */ 
+  async employeeMove({ id, role }) {
+    try {
+      console.log('🔄 API Call: employeeMove()');
+      const data = await this.request('/employeeMove', {
+        method: 'POST',
+        body: { id, role }
+      });
+      console.log('✅ API Success: employeeMove()');
+      return data &amp;&amp; data.data ? data.data : data;
+    } catch (err) {
+      console.error('❌ API Failed: employeeMove()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Generic table delete method - deletes rows matching column=value
+   * @param {Object} options
+   * @param {string} options.table - Table name (REQUIRED)
+   * @param {string} options.column - Column name to match (REQUIRED)
+   * @param {any} options.value - Value to match (REQUIRED)
+   * @returns {Promise&lt;number>} Number of rows deleted
+   */
+  async genericTableDelete({ table, column, value }) {
+    try {
+      console.log('🔄 API Call: genericTableDelete()');
+      const headers = {};
+      // Send dev bypass header when running in Node (test scripts)
+      if (this.isNode) {
+        headers['X-Dev-Bypass'] = '1';
+      }
+      const data = await this.request('/genericTableDelete', {
+        method: 'POST',
+        headers,
+        body: { table, column, value }
+      });
+      console.log('✅ API Success: genericTableDelete()');
+      return typeof data.deleted === 'number' ? data.deleted : data;
+    } catch (err) {
+      console.error('❌ API Failed: genericTableDelete()', err.message || err);
+      throw err;
+    }
+  }
+
+  // Fetch incomplete order by ID
+  async getIncompleteOrderById(orderId) {
+    try {
+      console.log('🔄 API Call: getIncompleteOrderById()', orderId);
+      if (orderId === undefined || orderId === null) {
+        throw new Error('orderId parameter is required');
+      }
+      // Send in both body and query to handle any body-parsing issues upstream
+      const data = await this.request(`/getIncompleteOrderById?orderId=${encodeURIComponent(orderId)}`, {
+        method: 'POST',
+        body: { orderId }
+      });
+      console.log('✅ API Success: getIncompleteOrderById()');
+      return data;
+    } catch (err) {
+      console.error('❌ API Failed: getIncompleteOrderById()', err.message || err);
+      throw err;
+    }
+  }
+
+  /**
+   * Generic table move method - inserts a new row with type validation
+   * 
+   * @param {Object} options - Create options
+   * @param {string} options.table - Table name to move into (REQUIRED)
+   * @param {Object} options.values - Object with column-value pairs (REQUIRED)
+   * @returns {Promise&lt;Object>} Created row with generated ID
+   * @throws {Error} If any value type doesn't match the expected database column type
+   */ 
+  async employeeMove({ id, role }) {
+    try {
+      console.log('🔄 API Call: employeeMove()');
+      const data = await this.request('/employeeMove', {
+        method: 'POST',
+        body: { id, role }
+      });
+      console.log('✅ API Success: employeeMove()');
+      return data &amp;&amp; data.data ? data.data : data;
+    } catch (err) {
+      console.error('❌ API Failed: employeeMove()', err.message || err);
+      throw err;
+    }
+  }
+  /**
+   * Validate employee login credentials
+   * @param {Object} options - Login options
+   * @param {string} options.username - Employee username (REQUIRED)
+   * @param {string} options.password - Employee password (REQUIRED)
+   * @param {number} options.role - Role indicator: 0 = cashier, 1 = manager (REQUIRED)
+   * @returns {Promise&lt;Object>} Login result with employee info if successful
+  */
+  async validateEmployeeLogin({ username, password, role }) {
+    try {
+      console.log('🔄 API Call: validateEmployeeLogin()');
+      const data = await this.request('/validateEmployeeLogin', {
+        method: 'POST',
+        body: { username, password, role }
+      });
+      
+      // Store session token if provided (persist in localStorage for browser)
+      if (data.success &amp;&amp; data.sessionToken) {
+        this.sessionToken = data.sessionToken;
+        if (typeof window !== 'undefined' &amp;&amp; window.localStorage) {
+          window.localStorage.setItem('sessionToken', data.sessionToken);
+          console.log('🔑 Session token stored in localStorage for API authentication');
+        } else {
+          console.log('🔑 Session token stored for API authentication');
+        }
+      }
+      
+      console.log('✅ API Success: validateEmployeeLogin()');
+      return data;
+    } catch (err) {
+      console.error('❌ API Failed: validateEmployeeLogin()', err.message || err);
+      throw err;
+    }
+  }
+
+
+   // Fetch incomplete order by ID
+  async getIncompleteOrderById(orderId) {
+    try {
+      console.log('🔄 API Call: getIncompleteOrderById()', orderId);
+      if (orderId === undefined || orderId === null) {
+        throw new Error('orderId parameter is required');
+      }
+      // Send in both body and query to handle any body-parsing issues upstream
+      const data = await this.request(`/getIncompleteOrderById?orderId=${encodeURIComponent(orderId)}`, {
+        method: 'POST',
+        body: { orderId }
+      });
+      console.log('✅ API Success: getIncompleteOrderById()');
+      return data;
+    } catch (err) {
+      console.error('❌ API Failed: getIncompleteOrderById()', err.message || err);
+      throw err;
+    }
+  }
+  
+  /**
+   * Authenticate with Google OAuth
+   * @param {string} accessToken - Google OAuth access token
+   * @returns {Promise&lt;Object>} Login result with employee info if successful
+   */
+  async googleAuth(accessToken) {
+    try {
+      console.log('🔄 API Call: googleAuth()');
+      console.log('📍 Backend URL:', this.base);
+      console.log('📍 Frontend origin:', typeof window !== 'undefined' ? window.location.origin : 'N/A');
+      console.log('📍 Full URL:', `${this.base}/googleAuth`);
+      
+      const data = await this.request('/googleAuth', {
+        method: 'POST',
+        body: { token: accessToken }
+      });
+      if (data.success &amp;&amp; data.sessionToken) {
+        this.sessionToken = data.sessionToken;
+        if (typeof window !== 'undefined' &amp;&amp; window.localStorage) {
+          window.localStorage.setItem('sessionToken', data.sessionToken);
+          console.log('🔑 Session token stored in localStorage for future requests');
+        } else {
+          console.log('🔑 Session token stored for future requests');
+        }
+      }
+      console.log('✅ API Success: googleAuth()');
+      return data;
+    } catch (err) {
+      console.error('❌ API Failed: googleAuth()', err);
+      console.error('📍 Attempted URL:', `${this.base}/googleAuth`);
+      console.error('📍 Frontend origin:', typeof window !== 'undefined' ? window.location.origin : 'N/A');
+      console.error('📍 Error type:', err.name);
+      console.error('📍 Error message:', err.message);
+      console.error('📍 Full error:', err);
+      
+      if (err.name === 'NetworkError' || (err.message &amp;&amp; err.message.includes('fetch'))) {
+        const frontendOrigin = typeof window !== 'undefined' ? window.location.origin : 'N/A';
+        throw new Error(
+          `Cannot connect to backend server at ${this.base}. ` +
+          `Frontend origin: ${frontendOrigin}. ` +
+          `Make sure the backend is running and CORS is configured to allow ${frontendOrigin}.`
+        );
+      }
+      throw err;
+    }
+  }
+  async isLoggedIn() {
+    try {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      if (res.status === 200) return await res.json();
+      return { loggedIn: false };
+    } catch {
+      return { loggedIn: false };
+    }
+  }
+}
+// Default instance for convenience in components
+const defaultClient = new ClientConnection();
+export default defaultClient;
+
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/errorCodes.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/errorCodes.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Error code registry and helpers.
+ *
+ * Responsibilities:
+ * - Provide enumerated error codes for validation/database failures.
+ * - Map codes to human-readable labels for API responses.
+ * - Keep error handling consistent across layers.
+ */
+/**
+ * Unique Error Code System
+ * Each error has a unique numeric code for easy identification and debugging
+ */
+
+export const ErrorCodes = {
+  // Authentication/Authorization Errors (1000-1999)
+  AUTH_NO_SESSION: 1001,
+  AUTH_TOKEN_INVALID: 1002,
+  AUTH_SESSION_EXPIRED: 1003,
+  AUTH_ACCOUNT_INACTIVE_COOKIE: 1004,
+  AUTH_ACCOUNT_INACTIVE_TOKEN: 1005,
+  AUTH_NOT_MANAGER: 1006,
+  AUTH_NOT_CASHIER: 1007,
+  AUTH_REQUIRED: 1008,
+  AUTH_SESSION_RELOAD_FAILED: 1009,
+
+  // Validation Errors (2000-2999)
+  VAL_INIT_ERROR: 2001,
+  VAL_MISSING_TABLE: 2002,
+  VAL_TABLE_NOT_FOUND: 2003,
+  VAL_INVALID_VALUES: 2004,
+  VAL_EMPTY_VALUES: 2005,
+  VAL_INVALID_COLUMNS: 2006,
+  VAL_TYPE_MISMATCH: 2007,
+  VAL_MISSING_COLUMN: 2008,
+  VAL_MISSING_ID: 2009,
+  VAL_MISSING_VALUE: 2010,
+  VAL_MISSING_REPORT_ID: 2011,
+  VAL_INVALID_REPORT_ID: 2012,
+  VAL_MISSING_USERNAME: 2013,
+  VAL_MISSING_PASSWORD: 2014,
+  VAL_INVALID_ROLE: 2015,
+  VAL_MISSING_GOOGLE_TOKEN: 2016,
+  VAL_MISSING_EMAIL: 2017,
+
+  // Database Errors (3000-3999)
+  DB_UNIQUE_VIOLATION: 3001,
+  DB_NOT_NULL_VIOLATION: 3002,
+  DB_FOREIGN_KEY_VIOLATION: 3003,
+  DB_CHECK_VIOLATION: 3004,
+  DB_INVALID_INPUT: 3005,
+  DB_UNDEFINED_COLUMN: 3006,
+  DB_UNKNOWN_ERROR: 3007,
+  DB_CONNECTION_ERROR: 3008,
+
+  // Not Found Errors (4000-4999)
+  NOT_FOUND_EMPLOYEE: 4001,
+  NOT_FOUND_REPORT: 4002,
+  NOT_FOUND_TABLE: 4003,
+  NOT_FOUND_RESOURCE: 4004,
+
+  // Server Errors (5000-5999)
+  SERVER_INTERNAL_ERROR: 5001,
+  SERVER_LOGOUT_FAILED: 5002,
+  SERVER_DATABASE_ERROR: 5003,
+  SERVER_UNKNOWN_ERROR: 5004,
+};
+
+/**
+ * Get error code name from numeric code
+ */
+export function getErrorCodeName(code) {
+  for (const [name, value] of Object.entries(ErrorCodes)) {
+    if (value === code) return name;
+  }
+  return 'UNKNOWN_ERROR';
+}
+
+/**
+ * Get error description from code
+ */
+export function getErrorDescription(code) {
+  const descriptions = {
+    // Auth
+    1001: 'No authentication session or token found',
+    1002: 'Authentication token is invalid or expired',
+    1003: 'Session has expired or is invalid',
+    1004: 'Account is inactive (cookie-based auth)',
+    1005: 'Account is inactive (token-based auth)',
+    1006: 'Manager access required for this operation',
+    1007: 'Cashier access required for this operation',
+    1008: 'Authentication required. Please log in.',
+    1009: 'Failed to reload session from store',
+    
+    // Validation
+    2001: 'ServerLogic not initialized',
+    2002: 'Table parameter is required',
+    2003: 'Table does not exist in database',
+    2004: 'Values parameter is invalid or missing',
+    2005: 'Values object is empty',
+    2006: 'One or more columns are invalid',
+    2007: 'Data type validation failed',
+    2008: 'Column parameter is required',
+    2009: 'ID parameter is required',
+    2010: 'Value parameter is required',
+    2011: 'Report ID is required',
+    2012: 'Report ID must be a valid number',
+    2013: 'Username is required',
+    2014: 'Password is required',
+    2015: 'Role must be 0 (cashier) or 1 (manager)',
+    2016: 'Google authentication token is required',
+    2017: 'Email is required',
+    
+    // Database
+    3001: 'Duplicate entry - value already exists',
+    3002: 'Required field is missing or null',
+    3003: 'Referenced value does not exist',
+    3004: 'Value does not meet table constraints',
+    3005: 'Invalid data format',
+    3006: 'Column does not exist in table',
+    3007: 'Unknown database error',
+    3008: 'Database connection error',
+    
+    // Not Found
+    4001: 'Employee not found',
+    4002: 'Report not found',
+    4003: 'Table not found',
+    4004: 'Resource not found',
+    
+    // Server
+    5001: 'Internal server error',
+    5002: 'Logout operation failed',
+    5003: 'Database operation failed',
+    5004: 'Unknown server error',
+  };
+  
+  return descriptions[code] || 'Unknown error';
+}
+
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

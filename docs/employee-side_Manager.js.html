@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/Manager.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/Manager.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import { Link, useNavigate } from 'react-router-dom';
+import "./Manager.css";
+import LogoutButton from '../components/LogoutButton/logoutButton.js';
+
+/**
+ * Manager view component.
+ *
+ * Renders manager navigation links and quick action buttons for common views
+ * (Customer Kiosk, Kitchen View, Menu Board). Uses `useNavigate` for
+ * programmatic navigation.
+ *
+ * @returns {JSX.Element}
+ */
+function Manager() {
+    /** Programmatic navigation helper from react-router */
+    const navigate = useNavigate();
+
+    /**
+     * Navigate to the public/customer kiosk view
+     * @returns {void}
+     */
+    const navToKiosk = () => {
+        navigate('/kiosk', { replace: true });
+    }
+
+    /**
+     * Navigate to the kitchen view
+     * @returns {void}
+     */
+    const navToKitchenView = () => {
+        navigate('/kitchenview', { replace: true });
+    }
+
+    /**
+     * Navigate to the menu board view
+     * @returns {void}
+     */
+    const navToMenuBoard = () => {
+        navigate('/menuboard', { replace: true });
+    }
+
+    return (
+  &lt;div>
+    {/* Navigation */}
+    &lt;nav
+      style={{ padding: '12px 16px', backgroundColor: '#f7f7f7', borderBottom: '1px solid #e5e7eb' }}
+      role="navigation"
+      aria-label="Main navigation"
+    >
+      &lt;Link to="/manager" style={{ margin: '10px' }}>Manager Home&lt;/Link>
+      &lt;Link to="/employees" style={{ margin: '10px' }}>Employees&lt;/Link>
+      &lt;Link to="/inventory" style={{ margin: '10px' }}>Inventory&lt;/Link>
+      &lt;Link to="/menu" style={{ margin: '10px' }}>Menu&lt;/Link>
+      &lt;Link to="/reports" style={{ margin: '10px' }}>Reports&lt;/Link>
+    &lt;/nav>
+
+    {/* Page Heading */}
+    &lt;h2 id="manager-welcome-heading" style={{ margin: '16px 0' }}>
+      Welcome!
+    &lt;/h2>
+
+    {/* Action Buttons */}
+    &lt;div
+      className="buttonRow"
+      role="region"
+      aria-labelledby="manager-welcome-heading"
+    >
+      &lt;LogoutButton aria-label="Logout from manager dashboard">Logout&lt;/LogoutButton>
+
+      &lt;button
+        className="defaultButton"
+        onClick={navToKiosk}
+        aria-label="Go to customer kiosk"
+      >
+        🍚 Customer Kiosk
+      &lt;/button>
+
+      &lt;button
+        className="defaultButton"
+        onClick={navToKitchenView}
+        aria-label="Go to kitchen view"
+      >
+        👩‍🍳 Kitchen View
+      &lt;/button>
+
+      &lt;button
+        className="defaultButton"
+        onClick={navToMenuBoard}
+        aria-label="Go to menu board"
+      >
+        🧾 Menu Board
+      &lt;/button>
+    &lt;/div>
+  &lt;/div>
+);
+
+}
+
+export default Manager;</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

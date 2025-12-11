@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/Reports.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/Reports.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import { Link } from 'react-router-dom';
+import React from 'react';
+import "./Reports.css";
+import "react-datepicker/dist/react-datepicker.css";
+import Dropdown from "../components/Dropdown/Dropdown.js";
+import DropdownItem from "../components/Dropdown/DropdownItem.js";
+import DatePicker from "react-datepicker";
+import client from './clientConnection.js';
+
+/**
+ * Reports component: UI for selecting and generating pre-defined reports.
+ *
+ * - Loads the list of available reports from the backend via `client.getReportList()`.
+ * - For date-range reports, exposes `fromDate` and `toDate` pickers.
+ * - Calls `client.getReport(id, params?)` to fetch report data and renders it in a table.
+ *
+ * @returns {JSX.Element}
+ */
+function Reports() {
+    /** List of available reports (loaded on mount) @type {Array&lt;Object>} */
+    const [reportList, setReportList] = React.useState([]);
+
+    /**
+     * Currently selected report
+     * @type {{name:string,description:string,id:number}}
+     */
+    const [selectedReport, setSelectedReport] = React.useState({
+        name: "",
+        description: "",
+        id: 0
+    })
+
+    /** From-date for date-range reports */
+    const [fromDate, setFromDate] = React.useState(new Date());
+
+    /** To-date for date-range reports */
+    const [toDate, setToDate] = React.useState(new Date());
+
+    /** Whether date pickers should be shown for the selected report */
+    const [isDateVisible, setIsDateVisible] = React.useState(false);
+
+    /** Rows returned by the last generated report */
+    const [reportTableData, setReportTableData] = React.useState([]);
+
+    /**
+     * Handle user selecting a report from the dropdown.
+     * Shows date pickers only for reports that support date ranges (IDs 30 and 31).
+     * @param {{id:number,name:string,description:string}} report
+     * @returns {void}
+     */
+    const handleReportSelect = (report) => {
+        setSelectedReport(report);
+        (report.id === 30 || report.id === 31) ? setIsDateVisible(true) : setIsDateVisible(false);
+    }
+
+    /**
+     * Load available reports on component mount.
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        const fetchReportList = async () => {
+            try {
+                const data = await client.getReportList();
+                console.log(data)
+                const reports = data.map(item => ({
+                        id: item.id,
+                        name: item.name,
+                        description: item.description,
+                        active: item.active
+                    })).filter(report => report.active === true);
+
+                console.log(reports[0]);
+                console.log(reports[0].name);
+                setReportList(reports);
+            } catch (error) {
+                console.error("An error occurred:", error.message);
+                setReportList(["Unable to load reports"]);
+            }
+        };
+
+        fetchReportList();
+    }, []);
+
+    /**
+     * Generate the selected report. For date-range reports (IDs 30,31) the
+     * `fromDate` and `toDate` are validated and passed to the backend.
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const generateReport = async () => {
+        if (selectedReport.id === 0) {
+            alert("Please select a report.");
+            return;
+        } if ((selectedReport.id === 30 || selectedReport.id === 31) &amp;&amp; (fromDate > toDate)) {
+            alert("Please ensure the From Date is before the To Date.");
+            return;
+        }
+        
+        let data;
+        if(selectedReport.id === 30 || selectedReport.id === 31) {
+            try {
+                console.log(fromDate.toJSON());
+                data = await client.getReport(selectedReport.id, {
+                    from: fromDate.toJSON(), 
+                    to: toDate.toJSON()
+            });
+            } catch (error) {
+                    console.error("An error occurred:", error.message);
+                    alert(["Unable to generate report"]);
+                    return;
+            }
+        } else {
+            try {
+                data = await client.getReport(selectedReport.id);
+            } catch (error) {
+                    console.error("An error occurred:", error.message);
+                    alert(["Unable to generate report"]);
+                    return;
+            } 
+        }
+
+        console.log(JSON.stringify(data));
+        setReportTableData(data.data);
+    }
+
+    return (
+    &lt;div>
+        &lt;nav
+        style={{ padding: '10px', backgroundColor: '#f0f0f0' }}
+        role="navigation"
+        aria-label="Main navigation"
+        >
+        &lt;Link to="/manager" style={{ margin: '10px' }}>Manager Home&lt;/Link>
+        &lt;Link to="/employees" style={{ margin: '10px' }}>Employees&lt;/Link>
+        &lt;Link to="/inventory" style={{ margin: '10px' }}>Inventory&lt;/Link>
+        &lt;Link to="/menu" style={{ margin: '10px' }}>Menu&lt;/Link>
+        &lt;Link to="/reports" style={{ margin: '10px' }}>Reports&lt;/Link>
+        &lt;/nav>
+        &lt;div role="region" aria-labelledby="report-controls-heading">
+        &lt;h2 id="report-controls-heading" className="sr-only">Report Controls&lt;/h2>
+        &lt;div className="controls">
+
+        &lt;Dropdown buttonText={selectedReport.name || "Select a Report"} aria-label="Select report">
+            {reportList.map((data) => (
+            &lt;DropdownItem
+                key={data.id}
+                onClick={() => handleReportSelect(data)}
+                aria-label={`Select report ${data.name}`}
+            >
+                {data.name}
+            &lt;/DropdownItem>
+            ))}
+        &lt;/Dropdown>
+
+        {isDateVisible &amp;&amp; (
+            &lt;label>
+            From Date: 
+            &lt;DatePicker
+                selected={fromDate}
+                onChange={(date) => setFromDate(date)}
+                aria-label="Select start date"
+            />
+            &lt;/label>
+        )}
+
+        {isDateVisible &amp;&amp; (
+            &lt;label>
+            To Date: 
+            &lt;DatePicker
+                selected={toDate}
+                onChange={(date) => setToDate(date)}
+                aria-label="Select end date"
+            />
+            &lt;/label>
+        )}
+
+        &lt;button
+            className="defaultButton"
+            onClick={generateReport}
+            aria-label="Generate report"
+        >
+            Generate Report
+        &lt;/button>
+        &lt;/div>
+
+        {selectedReport.description &amp;&amp; (
+        &lt;div className="reportDescription" role="region" aria-label="Report description">
+            {selectedReport.description}
+        &lt;/div>
+        )}
+
+        &lt;div className="reportTableContainer" role="region" aria-label="Report table">
+        &lt;div className="reportTableScroll">
+            {reportTableData.length > 0 &amp;&amp; (
+            &lt;table className="reportTable">
+                &lt;caption className="sr-only">
+                {selectedReport.name ? `${selectedReport.name} Report` : 'Report Table'}
+                &lt;/caption>
+                &lt;thead>
+                &lt;tr>
+                    {Object.keys(reportTableData[0]).map((key) => (
+                    &lt;th key={key} scope="col">{key}&lt;/th>
+                    ))}
+                &lt;/tr>
+                &lt;/thead>
+                &lt;tbody>
+                {reportTableData.map((row, rowIndex) => (
+                    &lt;tr key={rowIndex}>
+                    {Object.keys(row).map((colKey) => (
+                        &lt;td key={colKey}>
+                        {typeof row[colKey] === "boolean" ? row[colKey].toString() : row[colKey]}
+                        &lt;/td>
+                    ))}
+                    &lt;/tr>
+                ))}
+                &lt;/tbody>
+            &lt;/table>
+            )}
+        &lt;/div>
+        &lt;/div>
+        &lt;/div>
+    &lt;/div>
+    );
+}
+
+export default Reports;</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

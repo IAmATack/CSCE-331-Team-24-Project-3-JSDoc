@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/specialReports.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/specialReports.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import { pool } from "./db.js";
+
+/**
+ * Special reports generator (X and Z reports).
+ *
+ * Responsibilities:
+ * - Compute per-hour sales and order counts for current day (X report).
+ * - Summarize totals since last Z reset and reset counters (Z report).
+ */
+class SpecialReports {
+  constructor() {
+    this.lastZReportTime = null;
+    this.totalDayOrders = 0;
+    this.hourRevenue = Object.fromEntries(
+      Array.from({ length: 24 }, (_, h) => [h, 0])
+    );
+    this.generatedXReport = false;
+  }
+
+  /**
+   * Generate X report: sales and number of orders per hour today.
+   * Initializes the last Z timestamp if missing.
+   * @returns {Promise&lt;Array&lt;{hour:number,numOrders:number,sales:number}>>}
+   */
+  async generateXReport() {
+    console.log("Generating: X Report");
+    
+    if(this.lastZReportTime === null){
+        const queryYesterday = await pool.query("SELECT (NOW() - INTERVAL '1 DAY')::timestamp AS yesterdaydate;");
+        const yesterday = queryYesterday.rows[0].yesterdaydate;
+        console.log("   Yesterday timestamp from DB:", yesterday, typeof yesterday);
+        
+        // Handle both Date objects and timestamp strings from PostgreSQL
+        if (yesterday instanceof Date) {
+          this.lastZReportTime = yesterday;
+        } else if (typeof yesterday === 'string') {
+          this.lastZReportTime = new Date(yesterday);
+        } else {
+          // Fallback to 24 hours ago
+          this.lastZReportTime = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        }
+        
+        console.log("   Last Z Report Time set to:", this.lastZReportTime);
+    }
+    
+    // Convert Date object to PostgreSQL timestamp string format
+    let lastZReportTimeStr;
+    if (this.lastZReportTime instanceof Date) {
+      lastZReportTimeStr = this.lastZReportTime.toISOString().slice(0, 19).replace('T', ' ');
+    } else if (typeof this.lastZReportTime === 'string') {
+      lastZReportTimeStr = this.lastZReportTime;
+    } else {
+      // Fallback
+      lastZReportTimeStr = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    }
+    
+    console.log("   Using timestamp for query:", lastZReportTimeStr);
+    
+    const query = await pool.query(`
+        SELECT 
+            DATE_PART('hour', timeOfOrder) AS orderhour,
+            COUNT(*) AS numorders,
+            SUM(price) AS totalrevenue
+        FROM orders o
+        WHERE o.timeOfOrder::date=NOW()::date
+        AND o.timeOfOrder > $1::timestamp
+        GROUP BY orderhour
+        ORDER BY orderhour;
+    `, [lastZReportTimeStr]);
+    
+
+    const numOrdersMap = new Map();
+    const salesMap = new Map();
+    for(let i = 0; i &lt; query.rows.length; i++){
+      numOrdersMap.set(query.rows[i].orderhour, query.rows[i].numorders);
+      salesMap.set(query.rows[i].orderhour, query.rows[i].totalrevenue);
+    }
+
+    const xReport = query.rows.map(row => {
+        const hour = parseInt(row.orderhour, 10);
+        const numOrders = parseInt(row.numorders, 10);
+        const sales = parseFloat(row.totalrevenue);
+
+        // Update running totals
+        this.totalDayOrders += numOrders;
+        this.hourRevenue[hour] = sales;
+
+        return { hour, numOrders, sales };
+    });
+
+    this.generatedXReport = true;
+    console.log("Generated: X Report");
+
+    return xReport;
+  }
+
+  /**
+   * Generate Z report: totals since last X report and reset state.
+   * @returns {Promise&lt;Array&lt;{totalOrders:number,totalRevenue:number}>>}
+   */
+  async generateZReport() {
+    console.log("Generating: Z Report");
+
+    if(this.generatedXReport === false){
+      console.log("Error: Generate a X Report first");
+      return null;
+    }
+
+    // Calculate total revenue
+    let totalRevenue = 0;
+    for (const rev of Object.values(this.hourRevenue)) {
+      totalRevenue += rev;
+    }
+
+    // Round to 2 decimal places
+    const roundedRevenue = Math.round(totalRevenue * 100) / 100;
+
+    // Create Z Report data
+   const zReport = [
+        {
+            totalOrders: this.totalDayOrders,
+            totalRevenue: roundedRevenue
+        }
+    ];
+
+    console.log("Z Report:", zReport);
+
+    // Reset running totals
+    this.totalDayOrders = 0;
+    for (const hour in this.hourRevenue) {
+      this.hourRevenue[hour] = 0;
+    }
+    this.generatedXReport = false;
+
+    // Save the Z report timestamp
+    this.lastZReportTime = new Date();
+
+    return zReport;
+  }
+}
+
+export default SpecialReports;
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/POS.jsx</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/POS.jsx</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import React, { useState, useEffect, useRef } from "react";
+import Dropdown from "../components/Dropdown/Dropdown.js";
+import DropdownItem from "../components/Dropdown/DropdownItem.js";
+import LogoutButton from "../components/LogoutButton/logoutButton.js";
+import "./POS.css";
+import client from "./clientConnection.js";
+import { useNavigate } from "react-router-dom";
+
+/**
+ * Enumeration for supported meal types in the application.
+ * Used to categorize menu items and apply specific validation rules.
+ * @constant {Object}
+ */
+const MEAL_TYPES = {
+  ALC_ENTREE: "ALC_ENTREE",
+  ALC_SIDE: "ALC_SIDE",
+  BOWL: "BOWL",
+  PLATE: "PLATE",
+  BIGGER_PLATE: "BIGGER_PLATE",
+  UNKNOWN: "UNKNOWN",
+};
+
+/**
+ * Configuration rules for each meal type.
+ * Defines constraints such as allowed sides/entrees, quantities, and strict requirements.
+ * @constant {Object}
+ */
+const MEAL_RULES = {
+  [MEAL_TYPES.ALC_ENTREE]: {
+    kind: MEAL_TYPES.ALC_ENTREE,
+    allowSides: false,
+    allowEntrees: true,
+    maxSides: 0,
+    maxEntrees: 1,
+    requireSides: false,
+    requireEntrees: true,
+    entreeQtyBySize: {
+      small: 1,
+      medium: 2,
+      large: 3,
+      default: 1,
+    },
+  },
+  [MEAL_TYPES.ALC_SIDE]: {
+    kind: MEAL_TYPES.ALC_SIDE,
+    allowSides: true,
+    allowEntrees: false,
+    maxSides: 1,
+    maxEntrees: 0,
+    requireSides: true,
+    requireEntrees: false,
+    sideQtyBySize: {
+      medium: 1,
+      large: 2,
+      default: 1,
+    },
+  },
+  [MEAL_TYPES.BOWL]: {
+    kind: MEAL_TYPES.BOWL,
+    allowSides: true,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 1,
+    requireSides: true,
+    requireEntrees: true,
+  },
+  [MEAL_TYPES.PLATE]: {
+    kind: MEAL_TYPES.PLATE,
+    allowSides: true,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 2,
+    requireSides: true,
+    requireEntrees: true,
+  },
+  [MEAL_TYPES.BIGGER_PLATE]: {
+    kind: MEAL_TYPES.BIGGER_PLATE,
+    allowSides: true,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 3,
+    requireSides: true,
+    requireEntrees: true,
+  },
+  [MEAL_TYPES.UNKNOWN]: {
+    kind: MEAL_TYPES.UNKNOWN,
+    allowSides: true,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 2,
+    requireSides: false,
+    requireEntrees: false,
+  },
+};
+
+/**
+ * Determines the meal type based on the item name string.
+ * @param {string} itemname - The name of the menu item (e.g., "Bowl", "Side A La Carte").
+ * @returns {string} The corresponding MEAL_TYPES constant.
+ */
+function getMealTypeFromName(itemname = "") {
+  const name = itemname.toLowerCase();
+  if (name.includes("entree a la carte")) return MEAL_TYPES.ALC_ENTREE;
+  if (name.includes("side a la carte")) return MEAL_TYPES.ALC_SIDE;
+  if (name.includes("bigger")) return MEAL_TYPES.BIGGER_PLATE;
+  if (name.includes("plate")) return MEAL_TYPES.PLATE;
+  if (name.includes("bowl")) return MEAL_TYPES.BOWL;
+  return MEAL_TYPES.UNKNOWN;
+}
+
+/**
+ * Retrieves the validation rules object for a specific size item.
+ * @param {Object} sizeItem - The menu item representing the size/container.
+ * @returns {Object} The validation rules object from MEAL_RULES.
+ */
+function getRulesForSize(sizeItem) {
+  if (!sizeItem) return MEAL_RULES[MEAL_TYPES.UNKNOWN];
+  return MEAL_RULES[getMealTypeFromName(sizeItem.itemname)];
+}
+
+/**
+ * Extracts a normalized size label (small, medium, large) from an item name.
+ * Used primarily for A La Carte sizing logic.
+ * @param {string} itemname - The name of the item.
+ * @returns {string} 'small', 'medium', 'large', or 'default'.
+ */
+function getSizeLabelFromName(itemname = "") {
+  const name = itemname.toLowerCase();
+  if (name.includes("small")) return "small";
+  if (name.includes("medium")) return "medium";
+  if (name.includes("large")) return "large";
+  return "default";
+}
+
+/**
+ * Validates the current meal selection against the defined rules.
+ * Checks for required items and maximum quantity limits.
+ * @param {Object} rules - The rules object returned by getRulesForSize.
+ * @param {Object} size - The selected size item.
+ * @param {Array} sides - Array of selected side items.
+ * @param {Array} entrees - Array of selected entree items.
+ * @returns {Object} Result object { ok: boolean, message?: string }.
+ */
+function validateMeal(rules, size, sides, entrees) {
+  const type = rules.kind;
+
+  if (type === MEAL_TYPES.ALC_ENTREE) {
+    if (entrees.length === 0)
+      return { ok: false, message: "Select 1 entrée for A La Carte Entrée." };
+    if (sides.length > 0)
+      return { ok: false, message: "A La Carte Entrées cannot include sides." };
+  }
+
+  if (type === MEAL_TYPES.ALC_SIDE) {
+    if (sides.length === 0)
+      return { ok: false, message: "Select 1 side for A La Carte Side." };
+    if (entrees.length > 0)
+      return { ok: false, message: "A La Carte Sides cannot include entrées." };
+  }
+
+  if (rules.requireSides &amp;&amp; sides.length === 0)
+    return { ok: false, message: "Add at least one side!" };
+
+  if (rules.requireEntrees &amp;&amp; entrees.length === 0)
+    return { ok: false, message: "Add at least one entrée!" };
+
+  if (sides.length > rules.maxSides)
+    return {
+      ok: false,
+      message: `This meal allows only ${rules.maxSides} side(s).`,
+    };
+
+  if (entrees.length > rules.maxEntrees)
+    return {
+      ok: false,
+      message: `This meal allows only ${rules.maxEntrees} entrée(s).`,
+    };
+
+  return { ok: true };
+}
+
+/**
+ * Constructs the payload of meal items (sides/entrees) for the backend order.
+ * Handles quantity distribution (e.g., splitting portions for multiple sides).
+ * @param {Object} rules - The validation rules.
+ * @param {Object} size - The size item.
+ * @param {Array} sides - Selected sides.
+ * @param {Array} entrees - Selected entrees.
+ * @returns {Array} Array of formatted objects { menuID, quantity }.
+ */
+function buildMealItems(rules, size, sides, entrees) {
+  const type = rules.kind;
+
+  if (type === MEAL_TYPES.ALC_ENTREE) {
+    const label = getSizeLabelFromName(size.itemname);
+    const qty =
+      rules.entreeQtyBySize?.[label] ?? rules.entreeQtyBySize.default;
+    return entrees.map((e) => ({ menuID: e.id, quantity: qty }));
+  }
+
+  if (type === MEAL_TYPES.ALC_SIDE) {
+    const label = getSizeLabelFromName(size.itemname);
+    const qty = rules.sideQtyBySize?.[label] ?? rules.sideQtyBySize.default;
+    return sides.map((s) => ({ menuID: s.id, quantity: qty }));
+  }
+
+  const sideMealItems =
+    sides.length === 1
+      ? [{ menuID: sides[0].id, quantity: 1 }]
+      : sides.map((s) => ({ menuID: s.id, quantity: 0.5 }));
+
+  const entreeMealItems = entrees.map((e) => ({ menuID: e.id, quantity: 1 }));
+
+  return [...sideMealItems, ...entreeMealItems];
+}
+
+/**
+ * Cashier Point of Sale (POS) Component.
+ * * Responsibilities:
+ * - Render the cashier interface for order entry.
+ * - Manage order state (current meal builder, line items).
+ * - Poll backend for real-time inventory updates.
+ * - Enforce stock limits and gray out unavailable items.
+ * - Submit completed orders to the database.
+ * * @component
+ */
+export default function POSCashier() {
+  const [shiftSeconds, setShiftSeconds] = useState(0);
+  const nav = useNavigate();
+
+  useEffect(() => {
+    const start = localStorage.getItem("shiftStartTime");
+    if (!start) return;
+
+    const startTime = new Date(start).getTime();
+
+    const tick = () => {
+      const now = Date.now();
+      setShiftSeconds(Math.floor((now - startTime) / 1000));
+    };
+
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const hours = Math.floor(shiftSeconds / 3600);
+  const minutes = Math.floor((shiftSeconds % 3600) / 60);
+  const seconds = shiftSeconds % 60;
+
+  const shiftDisplay =
+    String(hours).padStart(2, "0") +
+    ":" +
+    String(minutes).padStart(2, "0") +
+    ":" +
+    String(seconds).padStart(2, "0");
+
+  const [orderItems, setOrderItems] = useState([]);
+  const [paymentType, setPaymentType] = useState("Cash");
+
+  const [menu, setMenu] = useState({
+    size: [],
+    sides: [],
+    entrees: [],
+    drinks: [],
+    appetizers: [],
+  });
+
+  const [inventoryMap, setInventoryMap] = useState({});
+  const [recipeMap, setRecipeMap] = useState({});
+
+  const [currentMeal, setCurrentMeal] = useState({
+    size: null,
+    sides: [],
+    entrees: [],
+  });
+  const [showUnfinishedModal, setShowUnfinishedModal] = useState(false);
+
+  const [currentDrink, setCurrentDrink] = useState(null);
+  const [currentApp, setCurrentApp] = useState(null);
+
+  useEffect(() => {
+    async function fetchMenu() {
+      try {
+        const report = await client.getReport(20);
+        const allItems = report.data || [];
+        const active = allItems.filter((item) => item.isactive);
+
+        const sizeOrder = [
+          "Bowl",
+          "Plate",
+          "Bigger Plate",
+          "Small Entree A la Carte",
+          "Medium Entree A la Carte",
+          "Large Entree A la Carte",
+          "Medium Side A la Carte",
+          "Large Side A la Carte",
+        ];
+
+        const sortedSizes = active
+          .filter((i) => i.mealtype === "M")
+          .sort((a, b) => {
+            const aIdx = sizeOrder.indexOf(a.itemname);
+            const bIdx = sizeOrder.indexOf(b.itemname);
+            return aIdx - bIdx;
+          });
+
+        setMenu({
+          size: sortedSizes,
+          sides: active.filter((i) => i.mealtype === "S"),
+          entrees: active.filter((i) => i.mealtype === "E"),
+          drinks: active.filter((i) => i.mealtype === "D"),
+          appetizers: active.filter((i) => i.mealtype === "A"),
+        });
+      } catch (err) {
+        console.error("Error loading menu:", err);
+      }
+    }
+    fetchMenu();
+  }, []);
+
+  // 2. Fetch Stock and Recipes (Runs periodically)
+  useEffect(() => {
+    async function fetchStockData() {
+      try {
+        // Fetch Inventory Table (Report 23)
+        const invReport = await client.getReport(23);
+        const inventoryData = invReport.data || [];
+
+        // Map ItemName -> Stock
+        const invMap = {};
+        inventoryData.forEach((item) => {
+          invMap[item.itemname] = Number(item.stock);
+        });
+        setInventoryMap(invMap);
+
+        // Fetch Menu Ingredients (Report 26)
+        const recipeReport = await client.getReport(26);
+        const recipeData = recipeReport.data || [];
+
+        const rMap = {};
+        recipeData.forEach((row) => {
+          rMap[row.menu_item] = row.ingredients;
+        });
+        setRecipeMap(rMap);
+      } catch (err) {
+        console.error("Error updating stock:", err);
+      }
+    }
+
+    // Initial fetch
+    fetchStockData();
+
+    // Poll every 5 seconds
+    const intervalId = setInterval(fetchStockData, 5000);
+
+    return () => clearInterval(intervalId);
+  }, []);
+
+  /**
+   * Checks if a specific menu item is out of stock based on current inventory.
+   * Applies "Smart Buffer" logic:
+   * - Ingredients requiring > 1 unit (bulk) use a strict 1x threshold.
+   * - Ingredients requiring &lt;= 1 unit use a 5x safety buffer.
+   * @param {Object} menuItem - The menu item object to check.
+   * @returns {boolean} True if the item should be disabled/grayed out.
+   */
+  const isOutOfStock = (menuItem) => {
+    if (!menuItem) return false;
+
+    const ingredients = recipeMap[menuItem.itemname];
+
+    if (!ingredients || ingredients.length === 0) return false;
+
+    for (const ing of ingredients) {
+      const currentStock = inventoryMap[ing.ingredient];
+      const singleServingReq = Number(ing.quantity);
+
+      const bufferMultiplier = singleServingReq > 1 ? 1 : 5;
+      const minimumThreshold = singleServingReq * bufferMultiplier;
+
+      if (currentStock === undefined || currentStock &lt; minimumThreshold) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const subtotal = orderItems.reduce(
+    (sum, it) => sum + Number(it.price || 0),
+    0
+  );
+
+  /**
+   * Handles the selection of a "Size" item (Bowl, Plate, etc.).
+   * Resets the current meal builder to start a new meal.
+   * @param {Object} item - The selected size menu item.
+   */
+  const handleSelectSize = (item) => {
+    if (isOutOfStock(item)) return; // Prevent selection logic
+    setCurrentMeal({ size: item, sides: [], entrees: [] });
+  };
+
+  /**
+   * Toggles a side selection for the current meal.
+   * Validates against the meal rules (e.g., max 2 sides for a plate).
+   * @param {Object} item - The selected side menu item.
+   */
+  const handleSelectSide = (item) => {
+    if (isOutOfStock(item)) return;
+
+    setCurrentMeal((prev) => {
+      if (!prev.size) {
+        alert("Select a meal size first!");
+        return prev;
+      }
+
+      const rules = getRulesForSize(prev.size);
+      if (!rules.allowSides) {
+        alert("This meal does not allow sides.");
+        return prev;
+      }
+
+      const exists = prev.sides.some((s) => s.id === item.id);
+      if (exists) {
+        return { ...prev, sides: prev.sides.filter((s) => s.id !== item.id) };
+      }
+
+      if (prev.sides.length >= rules.maxSides) {
+        alert(`You can select up to ${rules.maxSides} sides only!`);
+        return prev;
+      }
+
+      return { ...prev, sides: [...prev.sides, item] };
+    });
+  };
+
+  /**
+   * Toggles an entree selection for the current meal.
+   * Validates against the meal rules (e.g., max 2 entrees for a plate).
+   * @param {Object} item - The selected entree menu item.
+   */
+  const handleSelectEntree = (item) => {
+    if (isOutOfStock(item)) return;
+
+    setCurrentMeal((prev) => {
+      if (!prev.size) {
+        alert("Select a meal size first!");
+        return prev;
+      }
+
+      const rules = getRulesForSize(prev.size);
+      if (!rules.allowEntrees) {
+        alert("This meal does not allow entrées.");
+        return prev;
+      }
+
+      const exists = prev.entrees.some((e) => e.id === item.id);
+      if (exists) {
+        return {
+          ...prev,
+          entrees: prev.entrees.filter((e) => e.id !== item.id),
+        };
+      }
+
+      if (prev.entrees.length >= rules.maxEntrees) {
+        alert(`This meal allows only ${rules.maxEntrees} entrée(s).`);
+        return prev;
+      }
+
+      return { ...prev, entrees: [...prev.entrees, item] };
+    });
+  };
+
+  const handleSelectDrink = (item) => {
+    if (isOutOfStock(item)) return;
+    setCurrentDrink((prev) => (prev?.id === item.id ? null : item));
+  };
+
+  const handleSelectApp = (item) => {
+    if (isOutOfStock(item)) return;
+    setCurrentApp((prev) => (prev?.id === item.id ? null : item));
+  };
+
+  /**
+   * Generic handler that routes a click to the specific handler based on meal type.
+   * @param {Object} item - The menu item clicked.
+   */
+  const handleSelect = (item) => {
+    const type = item.mealtype;
+    if (type === "M") return handleSelectSize(item);
+    if (type === "S") return handleSelectSide(item);
+    if (type === "E") return handleSelectEntree(item);
+    if (type === "D") return handleSelectDrink(item);
+    if (type === "A") return handleSelectApp(item);
+  };
+
+  /**
+   * Validates the current meal builder and adds it to the main order list.
+   * Calculates extra charges (e.g., Premium Entrees) if applicable.
+   * Resets the builder state upon success.
+   */
+  const handleAddMeal = () => {
+    const { size, sides, entrees } = currentMeal;
+    if (!size) return alert("Select a meal size first!");
+
+    const rules = getRulesForSize(size);
+    const validation = validateMeal(rules, size, sides, entrees);
+    if (!validation.ok) return alert(validation.message);
+
+    const mealItems = buildMealItems(rules, size, sides, entrees);
+
+    const extraCharge = entrees.reduce(
+      (sum, e) => sum + (Number(e.price) > 0 ? Number(e.price) : 0),
+      0
+    );
+
+    const lineItem = {
+      menuID: size.id,
+      quantity: 1,
+      mealItems,
+      itemname: `${size.itemname} – ${[
+        ...sides.map((s) => s.itemname),
+        ...entrees.map((e) => e.itemname),
+      ].join(", ")}`,
+    };
+
+    setOrderItems((prev) => [
+      ...prev,
+      {
+        ...lineItem,
+        price: Number(size.price) + extraCharge,
+      },
+    ]);
+
+    setCurrentMeal({ size: null, sides: [], entrees: [] });
+  };
+
+  /**
+   * Adds the currently selected drink to the order list.
+   */
+  const handleAddDrink = () => {
+    if (!currentDrink) {
+      alert("Select a drink first!");
+      return;
+    }
+
+    setOrderItems((prev) => [
+      ...prev,
+      {
+        menuID: currentDrink.id,
+        quantity: 1,
+        mealItems: [],
+        itemname: currentDrink.itemname,
+        price: currentDrink.price,
+      },
+    ]);
+
+    setCurrentDrink(null);
+  };
+
+  /**
+   * Adds the currently selected appetizer to the order list.
+   */
+  const handleAddApp = () => {
+    if (!currentApp) {
+      alert("Select an appetizer first!");
+      return;
+    }
+
+    setOrderItems((prev) => [
+      ...prev,
+      {
+        menuID: currentApp.id,
+        quantity: 1,
+        mealItems: [],
+        itemname: currentApp.itemname,
+        price: currentApp.price,
+      },
+    ]);
+
+    setCurrentApp(null);
+  };
+
+  /**
+   * Removes an item from the order list by index.
+   * @param {number} i - Index of the item to remove.
+   */
+  const handleRemoveItem = (i) => {
+    setOrderItems((prev) => prev.filter((_, idx) => idx !== i));
+  };
+
+  /**
+   * Checks if there are any pending selections (e.g., a selected size but no meal added).
+   * Used to trigger the "Unfinished Items" modal.
+   * @returns {boolean} True if unfinished items exist.
+   */
+  function hasUnfinishedItems() {
+    if (
+      currentMeal.size ||
+      currentMeal.sides.length > 0 ||
+      currentMeal.entrees.length > 0
+    )
+      return true;
+    if (currentDrink) return true;
+    if (currentApp) return true;
+    return false;
+  }
+
+  /**
+   * Validates and submits the final order to the backend.
+   * Checks for empty orders and unfinished items.
+   */
+  const handleCompleteOrder = async () => {
+    if (hasUnfinishedItems()) {
+      setShowUnfinishedModal(true);
+      return;
+    }
+    if (orderItems.length === 0) {
+      alert("No items in the order!");
+      return;
+    }
+
+    try {
+      const payload = {
+        name: "Guest",
+        paymentType,
+        cashierID: await client.getID(),
+        delivered: true,
+        lineItems: orderItems.map((it) => ({
+          menuID: it.menuID,
+          quantity: it.quantity,
+          entree: it.mealItems,
+        })),
+      };
+
+      const result = await client.createOrder(payload);
+      if (result.success) {
+        alert(`Order submitted! ID: ${result.orderID}`);
+        setOrderItems([]);
+      } else {
+        alert("Order failed: " + (result.message || "Unknown error"));
+      }
+    } catch (err) {
+      alert("Error submitting order: " + err.message);
+    }
+  };
+
+  /**
+   * Submits the order ignoring any unfinished/pending selections.
+   * Triggered from the "Unfinished Items" modal.
+   */
+  const forceCompleteOrder = async () => {
+    setShowUnfinishedModal(false);
+
+    if (orderItems.length === 0) {
+      alert("No items in the order!");
+      return;
+    }
+
+    try {
+      const payload = {
+        name: "Guest",
+        paymentType,
+        cashierID: await client.getID(),
+        delivered: true,
+        lineItems: orderItems.map((it) => ({
+          menuID: it.menuID,
+          quantity: it.quantity,
+          entree: it.mealItems,
+        })),
+      };
+
+      const result = await client.createOrder(payload);
+      if (result.success) {
+        alert(`Order submitted! ID: ${result.orderID}`);
+        setOrderItems([]);
+        setCurrentMeal({ size: null, sides: [], entrees: [] });
+        setCurrentDrink(null);
+        setCurrentApp(null);
+      } else {
+        alert("Order failed: " + (result.message || "Unknown error"));
+      }
+    } catch (err) {
+      alert("Error submitting order: " + err.message);
+    }
+  };
+
+  /**
+   * Loads an existing line item back into the builder for modification.
+   * Removes the item from the order list so it can be re-added after editing.
+   * @param {number} index - Index of the item to edit.
+   */
+  const handleEditItem = (index) => {
+    const item = orderItems[index];
+
+    if (!item.mealItems || item.mealItems.length === 0) {
+      const menuItem =
+        menu.drinks.find((m) => m.id === item.menuID) ||
+        menu.appetizers.find((m) => m.id === item.menuID);
+
+      if (menuItem) {
+        if (menuItem.mealtype === "D") setCurrentDrink(menuItem);
+        if (menuItem.mealtype === "A") setCurrentApp(menuItem);
+      }
+
+      setOrderItems((prev) => prev.filter((_, i) => i !== index));
+      return;
+    }
+
+    const sizeItem = menu.size.find((s) => s.id === item.menuID);
+    if (!sizeItem) return;
+
+    const sides = [];
+    const entrees = [];
+
+    for (const mi of item.mealItems) {
+      const foundSide = menu.sides.find((s) => s.id === mi.menuID);
+      const foundEntree = menu.entrees.find((e) => e.id === mi.menuID);
+
+      if (foundSide) sides.push(foundSide);
+      if (foundEntree) entrees.push(foundEntree);
+    }
+
+    setCurrentMeal({
+      size: sizeItem,
+      sides,
+      entrees,
+    });
+
+    setOrderItems((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  return (
+    &lt;div className="pos-page">
+      &lt;div className="pos-left">
+        &lt;div
+          className="pos-left-title"
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          &lt;div>
+            &lt;h2 className="pos-left-title">Order&lt;/h2>
+            &lt;div
+              style={{ fontSize: "16px", fontWeight: "600", color: "#1e293b" }}
+            >
+              Shift Time: {shiftDisplay}
+            &lt;/div>
+          &lt;/div>
+          &lt;LogoutButton>Logout&lt;/LogoutButton>
+        &lt;/div>
+
+        &lt;div className="pos-order-list">
+          {orderItems.length === 0 ? (
+            &lt;div className="pos-empty-note">No items added&lt;/div>
+          ) : (
+            orderItems.map((it, idx) => (
+              &lt;div key={idx} className="pos-order-row">
+                &lt;span>{it.itemname}&lt;/span>
+                &lt;div className="pos-order-controls">
+                  &lt;span>${Number(it.price).toFixed(2)}&lt;/span>
+                  &lt;button
+                    className="pos-edit-btn"
+                    onClick={() => handleEditItem(idx)}
+                  >
+                    ✎
+                  &lt;/button>
+                  &lt;button
+                    className="pos-remove-btn"
+                    onClick={() => handleRemoveItem(idx)}
+                  >
+                    ✕
+                  &lt;/button>
+                &lt;/div>
+              &lt;/div>
+            ))
+          )}
+        &lt;/div>
+
+        {currentMeal.size &amp;&amp; (
+          &lt;div
+            className="pos-current-meal"
+            role="region"
+            aria-label="Current meal selection"
+          >
+            &lt;strong>Current Meal:&lt;/strong> {currentMeal.size.itemname}
+            &lt;br />
+            Sides:{" "}
+            {currentMeal.sides.length > 0
+              ? currentMeal.sides
+                  .map((s) =>
+                    currentMeal.sides.length === 2
+                      ? `${s.itemname} (½)`
+                      : s.itemname
+                  )
+                  .join(", ")
+              : "—"}
+            &lt;br />
+            Entrées:{" "}
+            {currentMeal.entrees.length > 0
+              ? currentMeal.entrees.map((e) => e.itemname).join(", ")
+              : "—"}
+          &lt;/div>
+        )}
+
+        {currentDrink &amp;&amp; (
+          &lt;div
+            className="pos-current-meal"
+            role="region"
+            aria-label="Selected drink"
+          >
+            &lt;strong>Selected Drink:&lt;/strong> {currentDrink.itemname}
+          &lt;/div>
+        )}
+
+        {currentApp &amp;&amp; (
+          &lt;div
+            className="pos-current-meal"
+            role="region"
+            aria-label="Selected appetizer"
+          >
+            &lt;strong>Selected Appetizer:&lt;/strong> {currentApp.itemname}
+          &lt;/div>
+        )}
+
+        &lt;div
+          className="pos-totals"
+          role="region"
+          aria-label="Order totals and payment options"
+        >
+          &lt;div className="pos-subtotal-row">
+            &lt;span>Subtotal&lt;/span>
+            &lt;span>${subtotal.toFixed(2)}&lt;/span>
+          &lt;/div>
+
+          &lt;div className="pos-payment-row">
+            &lt;span style={{ opacity: 0.8 }}>Payment Type&lt;/span>
+            &lt;Dropdown
+              buttonText={`Payment: ${paymentType}`}
+              aria-label="Select payment type"
+            >
+              &lt;DropdownItem onClick={() => setPaymentType("Cash")}>
+                Cash
+              &lt;/DropdownItem>
+              &lt;DropdownItem onClick={() => setPaymentType("Card")}>
+                Card
+              &lt;/DropdownItem>
+              &lt;DropdownItem onClick={() => setPaymentType("Dining Dollars")}>
+                Dining Dollars
+              &lt;/DropdownItem>
+            &lt;/Dropdown>
+          &lt;/div>
+
+          &lt;button
+            className="pos-complete-btn"
+            onClick={handleCompleteOrder}
+            aria-label="Complete order"
+          >
+            Complete Order
+          &lt;/button>
+        &lt;/div>
+      &lt;/div>
+
+      {/* RIGHT PANEL */}
+      &lt;div className="pos-right">
+        {/** Size Section **/}
+        &lt;Section
+          title="Size"
+          className="section-size"
+          aria-label="Select meal size"
+        >
+          {menu.size.map((it) => (
+            &lt;button
+              key={it.id}
+              className={`pos-item-btn ${
+                currentMeal.size?.id === it.id ? "selected" : ""
+              } ${isOutOfStock(it) ? "disabled" : ""}`}
+              onClick={() => handleSelect(it)}
+              disabled={isOutOfStock(it)}
+              aria-pressed={currentMeal.size?.id === it.id}
+              aria-label={`${it.itemname}, $${Number(it.price).toFixed(2)}`}
+            >
+              {it.itemname}
+              &lt;br />
+              &lt;span>${Number(it.price).toFixed(2)}&lt;/span>
+            &lt;/button>
+          ))}
+        &lt;/Section>
+
+        {/** Sides Section **/}
+        &lt;Section
+          title="Sides"
+          className="section-sides"
+          aria-label="Select sides"
+        >
+          {menu.sides.map((it) => (
+            &lt;button
+              key={it.id}
+              className={`pos-item-btn ${
+                currentMeal.sides.some((s) => s.id === it.id) ? "selected" : ""
+              } ${isOutOfStock(it) ? "disabled" : ""}`}
+              onClick={() => handleSelect(it)}
+              disabled={isOutOfStock(it)}
+              aria-pressed={currentMeal.sides.some((s) => s.id === it.id)}
+              aria-label={it.itemname}
+            >
+              {it.itemname}
+            &lt;/button>
+          ))}
+        &lt;/Section>
+
+        {/** Entrées Section **/}
+        &lt;Section
+          title="Entrées"
+          className="section-entrees"
+          aria-label="Select entrées"
+        >
+          {menu.entrees.map((it) => (
+            &lt;button
+              key={it.id}
+              className={`pos-item-btn ${
+                currentMeal.entrees.some((e) => e.id === it.id)
+                  ? "selected"
+                  : ""
+              } ${isOutOfStock(it) ? "disabled" : ""}`}
+              onClick={() => handleSelect(it)}
+              disabled={isOutOfStock(it)}
+              aria-pressed={currentMeal.entrees.some((e) => e.id === it.id)}
+              aria-label={`${it.itemname}${
+                Number(it.price) > 0 ? `, +$${Number(it.price).toFixed(2)}` : ""
+              }`}
+            >
+              {it.itemname}
+              {Number(it.price) > 0 &amp;&amp; (
+                &lt;span style={{ color: "#dc2626", fontWeight: 600 }}>
+                  {" "}
+                  +${Number(it.price).toFixed(2)}
+                &lt;/span>
+              )}
+            &lt;/button>
+          ))}
+        &lt;/Section>
+
+        &lt;div className="add-meal-btn-wrapper">
+          &lt;button
+            className="pos-add-meal-btn"
+            onClick={handleAddMeal}
+            aria-label="Add meal to order"
+          >
+            Add Meal to Order
+          &lt;/button>
+        &lt;/div>
+
+        {/** Appetizers Section **/}
+        &lt;Section
+          title="Appetizers"
+          className="section-apps"
+          aria-label="Select appetizers"
+        >
+          {(menu.appetizers || []).map((it) => (
+            &lt;button
+              key={it.id}
+              className={`pos-item-btn ${
+                currentApp?.id === it.id ? "selected" : ""
+              } ${isOutOfStock(it) ? "disabled" : ""}`}
+              onClick={() => handleSelect(it)}
+              disabled={isOutOfStock(it)}
+              aria-pressed={currentApp?.id === it.id}
+              aria-label={`${it.itemname}, $${Number(it.price).toFixed(2)}`}
+            >
+              {it.itemname}
+              &lt;br />
+              &lt;span>${Number(it.price).toFixed(2)}&lt;/span>
+            &lt;/button>
+          ))}
+        &lt;/Section>
+
+        &lt;div className="add-app-btn-wrapper">
+          &lt;button
+            className="pos-add-meal-btn"
+            onClick={handleAddApp}
+            aria-label="Add appetizer to order"
+          >
+            Add Appetizer to Order
+          &lt;/button>
+        &lt;/div>
+
+        {/** Drinks Section **/}
+        &lt;Section
+          title="Drinks"
+          className="section-drinks"
+          aria-label="Select drinks"
+        >
+          {menu.drinks.map((it) => (
+            &lt;button
+              key={it.id}
+              className={`pos-item-btn ${
+                currentDrink?.id === it.id ? "selected" : ""
+              } ${isOutOfStock(it) ? "disabled" : ""}`}
+              onClick={() => handleSelect(it)}
+              disabled={isOutOfStock(it)}
+              aria-pressed={currentDrink?.id === it.id}
+              aria-label={`${it.itemname}, $${Number(it.price).toFixed(2)}`}
+            >
+              {it.itemname}
+              &lt;br />
+              &lt;span>${Number(it.price).toFixed(2)}&lt;/span>
+            &lt;/button>
+          ))}
+        &lt;/Section>
+
+        &lt;div className="add-drink-btn-wrapper">
+          &lt;button
+            className="pos-add-meal-btn"
+            onClick={handleAddDrink}
+            aria-label="Add drink to order"
+          >
+            Add Drink to Order
+          &lt;/button>
+        &lt;/div>
+
+        &lt;div className="blank1">&lt;/div>
+      &lt;/div>
+
+      {showUnfinishedModal &amp;&amp; (
+        &lt;div className="pos-modal-overlay">
+          &lt;div className="pos-modal">
+            &lt;h3>Unfinished Items&lt;/h3>
+            &lt;p>You have selected items that haven't been added to the order.&lt;/p>
+            &lt;p>Would you like to continue anyway?&lt;/p>
+
+            &lt;div className="pos-modal-buttons">
+              &lt;button
+                className="pos-modal-cancel"
+                onClick={() => setShowUnfinishedModal(false)}
+              >
+                Go Back
+              &lt;/button>
+
+              &lt;button
+                className="pos-modal-confirm"
+                onClick={forceCompleteOrder}
+              >
+                Ignore &amp; Complete Order
+              &lt;/button>
+            &lt;/div>
+          &lt;/div>
+        &lt;/div>
+      )}
+    &lt;/div>
+  );
+}
+
+function Section({ title, children, className = "", ...props }) {
+  return (
+    &lt;div className={`pos-section ${className}`.trim()} {...props}>
+      &lt;div className="pos-section-header">{title}&lt;/div>
+      &lt;div className="pos-section-content">
+        {children || &lt;span style={{ opacity: 0.6 }}>No items loaded yet&lt;/span>}
+      &lt;/div>
+    &lt;/div>
+  );
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

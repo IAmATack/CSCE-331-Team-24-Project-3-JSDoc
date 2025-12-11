@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/emailSender.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/emailSender.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Email sending utilities.
+ *
+ * Responsibilities:
+ * - Compose and dispatch transactional emails (e.g., receipts).
+ * - Integrate with an SMTP or provider API using environment settings.
+ * - Provide simple functions consumed by order flows.
+ */
+import nodemailer from 'nodemailer';
+import { pool } from './db.js';
+
+// Send order receipt via SMTP. Uses env vars for configuration.
+// Expected env vars:
+// - SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, RECEIPT_FROM
+
+/**
+ * Build an SMTP transporter from environment configuration.
+ * Falls back to null when required variables are missing.
+ * @returns {Object|null}
+ */
+function getTransporter() {
+  const host = process.env.SMTP_HOST;
+  const port = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : undefined;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const secure = process.env.SMTP_SECURE === 'true' ? true : (port === 465);
+  const allowInsecureTls = process.env.SMTP_ALLOW_INSECURE === 'true';
+  const timeouts = {
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 20000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 20000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 20000)
+  };
+
+  if (!host || !port || !user || !pass) return null;
+
+  // Suppress verbose SMTP config logs
+
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+    ...timeouts,
+    tls: allowInsecureTls ? { rejectUnauthorized: false } : undefined
+  });
+}
+
+/**
+ * Retrieve menu item name and price for receipt rendering.
+ * @param {number} menuID
+ * @returns {Promise&lt;Object>}
+ */
+async function getMenuInfo(menuID) {
+  if (!menuID) return { name: `menu#${menuID}`, price: 0 };
+  try {
+    const r = await pool.query('SELECT itemName, price FROM menu WHERE id = $1', [menuID]);
+    if (r.rows &amp;&amp; r.rows[0]) {
+      return { name: r.rows[0].itemname || r.rows[0].itemName || `menu#${menuID}`, price: Number(r.rows[0].price) || 0 };
+    }
+    return { name: `menu#${menuID}`, price: 0 };
+  } catch {
+    return { name: `menu#${menuID}`, price: 0 };
+  }
+}
+
+/**
+ * Compose a plain-text receipt for an order.
+ * Includes line totals and final total; gracefully handles missing prices.
+ * @param {Object} params
+ * @returns {Promise&lt;string>} Plain-text email body.
+ */
+async function formatReceiptPlain({ orderID, orderObj, orderTotal }) {
+  const lines = [];
+  lines.push(`Panda 24 — Order #${orderID}`);
+  lines.push(`Date: ${new Date().toLocaleString()}`);
+  if (orderObj?.name) lines.push(`Customer: ${orderObj.name}`);
+  if (orderObj?.email) lines.push(`Email: ${orderObj.email}`);
+  lines.push('');
+  lines.push('Items');
+  lines.push('='.repeat(32));
+
+  let computedTotal = 0;
+
+  for (const li of (orderObj.lineItems || [])) {
+    const qty = li.quantity || 1;
+    const main = await getMenuInfo(li.menuID);
+    const mainTotal = (main.price || 0) * qty;
+    let linePrice = mainTotal;
+    const mainPricePart = mainTotal > 0 ? `  $${mainTotal.toFixed(2)}` : '';
+    lines.push(`• ${main.name} x${qty}${mainPricePart}`);
+
+    const entrees = Array.isArray(li.entree) ? li.entree : [];
+    for (const e of entrees) {
+      const ei = await getMenuInfo(e.menuID);
+      const eQty = e.quantity || 1;
+      const eTotal = (ei.price || 0) * eQty;
+      const pricePart = eTotal > 0 ? `  $${eTotal.toFixed(2)}` : '';
+      // Always show meal item; only include price when > 0
+      lines.push(`   + ${ei.name} x${eQty}${pricePart}`);
+      linePrice += eTotal;
+    }
+
+    computedTotal += linePrice;
+    lines.push(`   Line total: $${linePrice.toFixed(2)}`);
+    lines.push('');
+  }
+
+  const finalTotal = typeof orderTotal === 'number' ? orderTotal : computedTotal;
+  lines.push('Subtotal &amp; Total');
+  lines.push('='.repeat(32));
+  lines.push(`Total: $${Number(finalTotal || 0).toFixed(2)}`);
+  lines.push('');
+  lines.push('Thank you for your order!');
+
+  return lines.join('\n');
+}
+
+/**
+ * Send a receipt email for an order.
+ * Uses SMTP environment config or Ethereal in non-production as fallback.
+ * Retries with exponential backoff and a hard timeout per attempt.
+ * @param {Object} params
+ * @returns {Promise&lt;boolean>} True on success, false on failure or skip.
+ */
+export async function sendOrderReceipt({ orderID, orderObj, orderTotal, toEmail }) {
+  try {
+    if (!toEmail) {
+      // Suppress skip logs
+      return false;
+    }
+
+    let transporter = getTransporter();
+    if (!transporter) {
+      // Fallback to Ethereal test account in non-production for easy testing
+      if (process.env.NODE_ENV !== 'production') {
+        const testAccount = await nodemailer.createTestAccount();
+        transporter = nodemailer.createTransport({
+          host: 'smtp.ethereal.email',
+          port: 587,
+          secure: false,
+          auth: {
+            user: testAccount.user,
+            pass: testAccount.pass
+          }
+        });
+        // Suppress Ethereal login logs
+        // continue with Ethereal transporter
+      }
+    }
+
+    const from = process.env.RECEIPT_FROM || process.env.SMTP_USER || 'no-reply@example.com';
+
+    const text = await formatReceiptPlain({ orderID, orderObj, orderTotal });
+
+    const mailOptions = {
+      from,
+      to: toEmail,
+      subject: `Your receipt for order #${orderID}`,
+      text
+    };
+
+    // Suppress start logs
+
+    // Retry with hard timeout to avoid blocking order response if SMTP is slow
+    const hardTimeoutMs = Number(process.env.RECEIPT_SEND_TIMEOUT_MS || 20000);
+    const maxRetries = Number(process.env.RECEIPT_SEND_MAX_RETRIES || 1); // total attempts = 1 + maxRetries
+    const baseDelayMs = Number(process.env.RECEIPT_SEND_RETRY_DELAY_MS || 2000);
+
+    const attemptSend = async (attempt) => {
+      // Suppress per-attempt logs
+      return Promise.race([
+        transporter.sendMail(mailOptions),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Email send timed out after ${hardTimeoutMs}ms`)), hardTimeoutMs)),
+      ]);
+    };
+
+    let info;
+    let lastError = null;
+    for (let attempt = 0; attempt &lt;= maxRetries; attempt++) {
+      try {
+        info = await attemptSend(attempt);
+        break;
+      } catch (err) {
+        lastError = err;
+        const isLast = attempt === maxRetries;
+        // Suppress failure logs; still retry/backoff silently
+        if (!isLast) {
+          const delay = baseDelayMs * Math.pow(2, attempt);
+          await new Promise((res) => setTimeout(res, delay));
+        }
+      }
+    }
+    if (!info) throw lastError || new Error('Unknown email send error');
+
+    console.log('📧 Receipt emailed successfully.');
+    const preview = nodemailer.getTestMessageUrl &amp;&amp; nodemailer.getTestMessageUrl(info);
+    // Suppress preview logs
+    return true;
+  } catch (err) {
+    // Suppress error logs per request
+    return false;
+  }
+}
+
+export default { sendOrderReceipt };
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

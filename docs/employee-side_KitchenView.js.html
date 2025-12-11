@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/KitchenView.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/KitchenView.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import { Link } from 'react-router-dom';
+import React from 'react';
+import "./KitchenView.css";
+import Dropdown from "../components/Dropdown/Dropdown.js";
+import DropdownItem from "../components/Dropdown/DropdownItem.js";
+import client from './clientConnection.js';
+
+/**
+ * KitchenView component: shows current incomplete orders for kitchen staff.
+ *
+ * - Polls the backend every 30 seconds for undelivered orders and merges
+ *   any new incomplete orders into the displayed list.
+ * - Allows marking orders as completed which updates the backend and UI.
+ *
+ * @returns {JSX.Element}
+ */
+function KitchenView() {
+
+    /** Array of incomplete orders to display; each item is an order object from the API */
+    const [orderList, setOrderList] = React.useState([]);
+
+    /**
+     * Poll for new incomplete orders on mount and every 30 seconds thereafter.
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        refreshOrders();
+
+        const interval = setInterval(refreshOrders, 30000);
+        return () => clearInterval(interval);
+    }, []);
+
+    /**
+     * Fetch latest incomplete orders and merge them into the `orderList` state.
+     * Makes multiple backend calls: one to obtain undelivered order ids, then
+     * individual calls to retrieve full order details for each id.
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const refreshOrders = async () => {
+        try {
+            // Step 1 — Get ALL orders (like before)
+            const allOrders = await client.getReport(24);
+            console.log(allOrders);
+
+            // Filter only the undelivered ones
+            const undeliveredIds = allOrders.data
+                .filter(order => order.delivered === false)
+                .map(order => order.id);
+            console.log(undeliveredIds);
+
+            if (!undeliveredIds.length) return;
+
+            // Step 2 — For each ID, fetch the detailed incomplete order
+            const orderPromises = undeliveredIds.map(id =>
+                client.getIncompleteOrderById(Number(id))
+            );
+
+            const orderResults = await Promise.all(orderPromises);
+
+            // Extract the actual order objects from API responses
+            // Server returns { success: true, order: [row] }
+            const newOrders = orderResults
+                .map(res => Array.isArray(res?.order) ? res.order[0] : (res?.order || res?.data || null))
+                .filter(order => order &amp;&amp; order.order_id);
+
+            // Step 3 — Merge while avoiding duplicates
+            setOrderList(prev => {
+                const existingIds = new Set(prev.map(o => o.order_id));
+
+                const onlyNew = newOrders.filter(
+                    order => !existingIds.has(order.order_id)
+                );
+
+                return [...prev, ...onlyNew];
+            });
+
+        } catch (error) {
+            console.error("Failed to fetch incomplete orders:", error);
+        }
+    };
+
+    /**
+     * Mark the order as completed (delivered) in the backend and remove it from UI.
+     * @param {number} orderID
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const markOrderAsCompleted = async (orderID) => {
+        try {
+            await client.genericTableSet({
+                table: 'orders',
+                column: 'delivered',
+                value: true,
+                id: orderID
+            });
+        } catch (error) {
+            console.error("Failed to mark order as completed:", error);
+            alert("Failed to mark order as completed: " + error.message);
+        }
+
+        // Remove the completed order from UI
+        setOrderList(prevItems => prevItems.filter(item => item.order_id !== orderID));
+    };
+
+    /** Render the kitchen orders UI */
+    return (
+  &lt;div>
+    &lt;h2 id="kitchen-view-heading">Kitchen View&lt;/h2>
+
+    {/* Live region for new orders or updates */}
+    &lt;div
+      aria-live="polite"
+      aria-atomic="true"
+      className="ordersContainer"
+      role="region"
+      aria-labelledby="kitchen-view-heading"
+    >
+      {orderList.map((order) => (
+        &lt;div
+          key={order.order_id}
+          className="orderCard"
+          role="group"
+          aria-labelledby={`order-${order.order_id}-heading`}
+        >
+          &lt;h3 id={`order-${order.order_id}-heading`}>
+            Order #{order.order_id} {order.order_name}
+          &lt;/h3>
+
+          {/* Time elapsed with aria-label */}
+          &lt;p aria-label={`Time elapsed for order ${order.order_id}`}>
+            {order.timeelapsed.days ? `${order.timeelapsed.days}d ` : ""}
+            {order.timeelapsed.hours ? `${order.timeelapsed.hours}h ` : ""}
+            {order.timeelapsed.minutes ? `${order.timeelapsed.minutes}m ` : ""}
+            {order.timeelapsed.seconds ? `${order.timeelapsed.seconds}s` : ""}
+          &lt;/p>
+
+          &lt;div
+            role="list"
+            aria-label={`Items for order ${order.order_id}`}
+          >
+            {order.line_items.map((item) => (
+              &lt;div key={item.id} className="item" role="listitem">
+                &lt;span>{`${item.line_item_quantity}x ${item.line_item_name}`}&lt;/span>
+
+                {item.meal_items.length > 0 &amp;&amp; (
+                  &lt;div
+                    role="list"
+                    aria-label={`Sub-items for ${item.line_item_name}`}
+                  >
+                    {item.meal_items.map((subItem) => (
+                      &lt;div key={subItem.id} className="subItem" role="listitem">
+                        {subItem.meal_item_name}
+                      &lt;/div>
+                    ))}
+                  &lt;/div>
+                )}
+              &lt;/div>
+            ))}
+          &lt;/div>
+
+          &lt;button
+            className="completeButton"
+            onClick={() => markOrderAsCompleted(order.order_id)}
+            aria-label={`Mark order ${order.order_id} as completed`}
+          >
+            Complete
+          &lt;/button>
+        &lt;/div>
+      ))}
+    &lt;/div>
+  &lt;/div>
+);
+
+} export default KitchenView;
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

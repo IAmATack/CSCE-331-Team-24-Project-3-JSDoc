@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/Employees.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/Employees.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import React from "react";
+import { Link } from 'react-router-dom';
+import "./Employees.css";
+import "./Manager.css";
+import "react-datepicker/dist/react-datepicker.css";
+import Dropdown from "../components/Dropdown/Dropdown.js";
+import DropdownItem from "../components/Dropdown/DropdownItem.js";
+import DatePicker from "react-datepicker";
+import client from './clientConnection.js';
+
+/**
+ * Employees component: provides UI and logic for viewing/updating cashiers and managers.
+ *
+ * - Loads lists of cashiers and managers from the backend via `client`.
+ * - Allows selecting an employee/manager, viewing attributes, updating fields,
+ *   promoting/demoting between roles, and adding new employees.
+ *
+ * Notes: comments only; behavior and API calls remain unchanged.
+ */
+function Employees() {
+    
+    /** Displayable field labels used by the update dropdowns */
+    const fields = ["Name", "Email", "Working Hours", "Total Hours", "Pay Rate", "Pay Date", "Active?"];
+
+    /**
+     * Cashiers list (loaded from `cashiers` table)
+     * @type {Array&lt;Object>}
+     */
+    const [employees, setEmployees] = React.useState([]);
+
+    /**
+     * Selected cashier details shown in the UI
+     * @type {{name:string,email:string,workingHours:number,totalHours:number,payRate:number,payDate:string,isActive:boolean,id:number,username:string,password:string}}
+     */
+    const [selectedEmployee, updateSelectedEmployee] = React.useState ({
+        name: "",
+        email: "",
+        workingHours: 0.0,
+        totalHours: 0.0,
+        payRate: 0.0,
+        payDate: "",
+        isActive: false,
+        id: -1,
+        username: "",
+        password: ""
+    });
+
+    /** Which field the user wants to update for the selected employee */
+    const [selectedEmployeeField, updateSelectedEmployeeField] = React.useState("");
+
+    /** Temporary string value input used when updating employee fields */
+    const [newEmployeeStringValue, setNewEmployeeStringValue] = React.useState("");
+
+    /** Temporary numeric value input used for numeric fields (hours, pay rate) */
+    const [newEmployeeNumberValue, setNewEmployeeNumberValue] = React.useState(0.25);
+
+    /** Temporary date value used for updating pay date */
+    const [newEmployeeDateValue, setNewEmployeeDateValue] = React.useState(new Date());
+
+    /** Manager state (mirrors cashier state structure) */
+    /** Managers list (loaded from `managers` table) */
+    const [managers, setManagers] = React.useState([]);
+
+    /**
+     * Selected manager details shown in the UI
+     * @type {{name:string,email:string,workingHours:number,totalHours:number,payRate:number,payDate:string,isActive:boolean,id:number,username:string,password:string}}
+     */
+    const [selectedManager, updateSelectedManager] = React.useState({
+        name: "",
+        email: "",
+        workingHours: 0.0,
+        totalHours: 0.0,
+        payRate: 0.0,
+        payDate: "",
+        isActive: false,
+        id: -1,
+        username: "",
+        password: ""
+    });
+
+    /** Which field the user wants to update for the selected manager */
+    const [selectedManagerField, updateSelectedManagerField] = React.useState("");
+
+    /** Temporary string value used when updating manager fields */
+    const [newManagerStringValue, setNewManagerStringValue] = React.useState("");
+
+    /** Temporary numeric value used for numeric manager fields */
+    const [newManagerNumberValue, setNewManagerNumberValue] = React.useState(0.25);
+
+    /** Temporary date value used for updating manager pay date */
+    const [newManagerDateValue, setNewManagerDateValue] = React.useState(new Date());
+
+    /**
+     * State for the "Add New Employee" form
+     * @property {string} name
+     * @property {string} email
+     * @property {number} workingHours
+     * @property {number} totalHours
+     * @property {number} payRate
+     * @property {Date} payDate
+     * @property {boolean} isActive
+     * @property {string} username
+     * @property {string} password
+     * @property {string} role - either "Cashier" or "Manager"
+     */
+    const [employeeToAdd, updateEmployeeToAdd] = React.useState({
+        name: "",
+        email: "",
+        workingHours: 0.0,
+        totalHours: 0.0,
+        payRate: 0.25, // min allowed
+        payDate: new Date(),
+        isActive: true,
+        username: "",
+        password: "",
+        role: "" //manager or cashier
+    });
+
+    /** -----------------------
+     * Data fetching and helper functions
+     * ----------------------- */
+
+    /**
+     * Fetch the list of cashier names to populate the select dropdown
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const fetchEmployees = async () => {
+        try {
+            const data = await client.genericTableGet({
+                table: "cashiers",
+                columns: ["cashiername"],
+            });
+            setEmployees(data);
+        } catch (error) {
+            console.error("An error occurred:", error.message);
+            setEmployees(["Unable to load employees"]);
+        }
+    };
+
+    /** Load all cashiers on page startup to populate lists */
+    React.useEffect(() => {
+        fetchEmployees();
+    }, []);
+
+    /**
+     * When `selectedEmployee.name` changes, fetch full details for that cashier
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        if (!selectedEmployee.name || selectedEmployee.name === "Select an Employee") return; // do nothing if no selection
+
+        const fetchEmployeeDetails = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "cashiers",
+                    columns: ["id", "cashiername", "email", "workinghours", "totalhours", "payrate", "paydate", "isactive", "username", "_password"],
+                });
+
+                // Filter the result for the selected employee
+                const emp = data.find(e => e.cashiername === selectedEmployee.name);
+
+                if (emp) {
+                    updateSelectedEmployee({
+                        id: emp.id ?? -1,
+                        name: emp.cashiername ?? "",
+                        email: emp.email ?? "",
+                        workingHours: emp.workinghours ?? 0,
+                        totalHours: emp.totalhours ?? 0,
+                        payRate: emp.payrate ?? 0,
+                        payDate: emp.paydate.substring(0, emp.paydate.indexOf("T")) ?? "",
+                        isActive: emp.isactive.toString() ?? "false",
+                        username: emp.username ?? "",
+                        password: emp._password ?? ""
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to fetch employee details:", error.message);
+            }
+        };
+
+        fetchEmployeeDetails();
+    }, [selectedEmployee.name]);
+
+    /**
+     * Select an employee by name. Triggers the effect that loads full details.
+     * @param {string} name
+     * @returns {void}
+     */
+    const onEmployeeSelect = (name) => {
+        updateSelectedEmployee({
+            name: name,
+        })
+    }
+
+    const onEmployeeFieldSelect = (name) => {
+        updateSelectedEmployeeField(name);
+        setNewEmployeeStringValue("");
+        setNewEmployeeNumberValue(0.25);
+    }
+
+    /**
+     * Validate user inputs and submit a single-field update for the selected cashier.
+     * Maps the human-friendly field name to a DB column and performs type conversion.
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onUpdateEmployeeClick = async () => {
+        if (!selectedEmployee.name || !selectedEmployeeField) {
+            alert("Please select an employee, a field, and enter a new value");
+            return;
+        }
+
+        try {
+            // Map field names to database column names
+            const columnMap = {
+                "Name": "cashiername",
+                "Email": "email",
+                "Working Hours": "workinghours",
+                "Total Hours": "totalhours",
+                "Pay Rate": "payrate",
+                "Pay Date": "paydate",
+                "Active?": "isactive"
+            };
+
+            const column = columnMap[selectedEmployeeField];
+
+            if (!column) throw new Error("Invalid field selected");
+
+            // Data validation and explicit type conversion if necessary
+            let valueToSet;
+            if (column === "workinghours" || column === "totalhours" || column === "payrate") {
+                valueToSet = Number(newEmployeeNumberValue);
+            } else if (column === "isactive") {
+                if (newEmployeeStringValue === "") {
+                    alert("Please select an option.");
+                    return;
+                }
+                valueToSet = (newEmployeeStringValue === "True" ? true : false);
+            } else if (column === "paydate") {
+                if (newEmployeeDateValue &lt; new Date()) {
+                    alert("Please enter a date in the future.");
+                    return;
+                }
+                valueToSet = newEmployeeDateValue.toJSON();
+            } else {
+                if (newEmployeeStringValue === "") {
+                    alert("Please enter a value.");
+                    return;
+                }
+                valueToSet = newEmployeeStringValue;
+            }
+
+            await client.genericTableSet({
+                table: "cashiers",
+                column: column,
+                value: valueToSet,
+                id: selectedEmployee.id 
+            });
+
+            alert("Employee updated successfully!");
+
+            const updatedData = await client.genericTableGet({
+                table: "cashiers",
+                columns: ["cashiername", "email", "workinghours", "totalhours", "payrate", "paydate", "isactive", "id"],
+                id: selectedEmployee.id
+            });
+
+            if (updatedData &amp;&amp; updatedData.length > 0) {
+                const emp = updatedData[0];
+                updateSelectedEmployee({
+                    name: emp.cashiername,
+                    email: emp.email ?? "",
+                    workingHours: emp.workinghours ?? 0,
+                    totalHours: emp.totalhours ?? 0,
+                    payRate: emp.payrate ?? 0,
+                    payDate: emp.paydate.substring(0, emp.paydate.indexOf("T")) ?? "",
+                    isActive: emp.isactive.toString() ?? "false",
+                    id: emp.id,
+                    username: emp.username,
+                    password: emp._password
+                });
+            }
+        } catch (error) {
+            console.error("Failed to update employee:", error);
+            alert("Failed to update employee: " + error.message);
+        }
+    }
+
+    /**
+     * Promote the selected cashier to a manager role by calling `client.employeeMove`.
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onMakeManagerClick = async () => {
+        if(!selectedEmployee.name) {
+            alert("Please select an employee");
+            return;
+        }
+        const newManagerName = selectedEmployee.name;
+
+        try {
+            client.employeeMove({
+                id: selectedEmployee.id,
+                role: Number(1)
+            })
+
+            // update screen 
+            await fetchEmployees();
+            await fetchManagers();
+            await onManagerSelect(newManagerName);
+            await onEmployeeSelect("");
+
+            alert("Promotion successful!");
+        } catch (error) {
+            console.error("Failed to update employee:", error);
+            alert("Failed to update employee: " + error.message);
+        }
+    }
+
+    // MANAGERS
+
+    /**
+     * Fetch list of manager names for the managers dropdown
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const fetchManagers = async () => {
+        try {
+            const data = await client.genericTableGet({
+                table: "managers",
+                columns: ["managername"],
+            });
+            setManagers(data);
+        } catch (error) {
+            console.error("An error occurred:", error.message);
+            setManagers(["Unable to load managers"]);
+        }
+    };
+
+    /** Load all managers on page startup to populate lists */
+    React.useEffect(() => {
+        fetchManagers();
+    }, []);
+
+    /**
+     * When `selectedManager.name` changes, fetch full details for that manager
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        if (!selectedManager.name || selectedManager.name === "Select a Manager") return; // do nothing if no selection
+
+        const fetchManagerDetails = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "managers",
+                    columns: ["id", "managername", "email", "workinghours", "totalhours", "payrate", "paydate", "isactive", "username", "_password"],
+                });
+
+                // Filter the result for the selected manager
+                const emp = data.find(e => e.managername === selectedManager.name);
+
+                if (emp) {
+                    updateSelectedManager({
+                        id: emp.id ?? -1,
+                        name: emp.managername ?? "",
+                        email: emp.email ?? "",
+                        workingHours: emp.workinghours ?? 0,
+                        totalHours: emp.totalhours ?? 0,
+                        payRate: emp.payrate ?? 0,
+                        payDate: emp.paydate.substring(0, emp.paydate.indexOf("T")) ?? "",
+                        isActive: emp.isactive.toString() ?? "false",
+                        username: emp.username ?? "",
+                        password: emp._password ?? ""
+                    });
+                }
+                console.log(emp._password);
+            } catch (error) {
+                console.error("Failed to fetch manager details:", error.message);
+            }
+        };
+
+        fetchManagerDetails();
+    }, [selectedManager.name]);
+
+    /**
+     * Select a manager by name. Triggers the effect that loads full details.
+     * @param {string} name
+     * @returns {void}
+     */
+    const onManagerSelect = (name) => {
+        updateSelectedManager({
+            name: name,
+        })
+    }
+
+    /**
+     * Select which manager field to update and reset temporary inputs
+     * @param {string} name
+     * @returns {void}
+     */
+    const onManagerFieldSelect = (name) => {
+        updateSelectedManagerField(name);
+        setNewManagerStringValue("");
+        setNewManagerNumberValue(0.25);
+    }
+
+    /**
+     * Validate and submit a single-field update for the selected manager
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onUpdateManagerClick = async () => {
+        if (!selectedManager.name || !selectedManagerField) {
+            alert("Please select a Manager, a field, and enter a new value");
+            return;
+        }
+
+        try {
+            // Map field names to database column names
+            const columnMap = {
+                "Name": "managername",
+                "Email": "email",
+                "Working Hours": "workinghours",
+                "Total Hours": "totalhours",
+                "Pay Rate": "payrate",
+                "Pay Date": "paydate",
+                "Active?": "isactive"
+            };
+
+            const column = columnMap[selectedManagerField];
+
+            if (!column) throw new Error("Invalid field selected");
+
+            // Data validation and explicit type conversion if necessary
+            let valueToSet;
+            if (column === "workinghours" || column === "totalhours" || column === "payrate") {
+                valueToSet = Number(newManagerNumberValue);
+            } else if (column === "isactive") {
+                if (newManagerStringValue === "") {
+                    alert("Please select an option.");
+                    return;
+                }
+                valueToSet = (newManagerStringValue === "True" ? true : false);
+            } else if (column === "paydate") {
+                if (newManagerDateValue &lt; new Date()) {
+                    alert("Please enter a date in the future.");
+                    return;
+                }
+                valueToSet = newManagerDateValue.toJSON();
+            } else {
+                if (newManagerStringValue === "") {
+                    alert("Please enter a value.");
+                    return;
+                }
+                valueToSet = newManagerStringValue;
+            }
+
+            await client.genericTableSet({
+                table: "managers",
+                column: column,
+                value: valueToSet,
+                id: selectedManager.id 
+            });
+
+            alert("Manager updated successfully!");
+
+            const updatedData = await client.genericTableGet({
+                table: "managers",
+                columns: ["managername", "email", "workinghours", "totalhours", "payrate", "paydate", "isactive", "id", "username", "_password"],
+                id: selectedManager.id
+            });
+
+            if (updatedData &amp;&amp; updatedData.length > 0) {
+                const emp = updatedData[0];
+                updateSelectedManager({
+                    name: emp.managername,
+                    email: emp.email ?? "",
+                    workingHours: emp.workinghours ?? 0,
+                    totalHours: emp.totalhours ?? 0,
+                    payRate: emp.payrate ?? 0,
+                    payDate: emp.paydate.substring(0, emp.paydate.indexOf("T")) ?? "",
+                    isActive: emp.isactive.toString() ?? "false",
+                    id: emp.id,
+                    username: emp.username ?? "",
+                    password: emp._password ?? ""
+                });
+            }
+        } catch (error) {
+            console.error("Failed to update manager:", error);
+            alert("Failed to update manager: " + error.message);
+        }
+    }
+
+    /**
+     * Demote the selected manager back to a cashier role
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onMakeEmployeeClick = async () => {
+        if(!selectedManager.name) {
+            alert("Please select a manager");
+            return;
+        }
+        const newEmployeeName = selectedManager.name;
+
+        try {
+            client.employeeMove({
+                id: selectedManager.id,
+                role: Number(0)
+            })
+
+            // update screen 
+            await fetchEmployees();
+            await fetchManagers();
+            await onEmployeeSelect(newEmployeeName);
+            await onManagerSelect("");
+
+            alert("Demotion successful!");
+        } catch (error) {
+            console.error("Failed to update manager:", error);
+            alert("Failed to update manager: " + error.message);
+        }
+
+    }
+
+    /**
+     * Add new employee
+     * Validate inputs and create a new employee row in either `cashiers` or `managers`.
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const addNewEmployee = async () => {
+        // data validation
+        if (employeeToAdd.name === "" || employeeToAdd.email === "" || employeeToAdd.role === "") {
+            alert("Please complete all fields.");
+            return;
+        } if (employeeToAdd.payDate &lt;= new Date()) {
+            alert("Please choose a Pay Date in the future.");
+            return;
+        }
+
+        try {
+            if(employeeToAdd.role === "Cashier") {
+                await client.genericTableCreate({
+                    table: "cashiers",
+                    values: {
+                        cashiername: employeeToAdd.name,
+                        email: employeeToAdd.email,
+                        username: employeeToAdd.username,
+                        _password: employeeToAdd.password,
+                        workinghours: Number(0),
+                        totalhours: Number(0),
+                        payrate: Number(employeeToAdd.payRate),
+                        paydate: employeeToAdd.payDate.toJSON(),
+                        isactive: Boolean(true)
+                    }
+                });
+                fetchEmployees();
+            } else {
+                await client.genericTableCreate({
+                    table: "managers",
+                    values: {
+                        managername: employeeToAdd.name,
+                        email: employeeToAdd.email,
+                        username: employeeToAdd.username,
+                        _password: employeeToAdd.password,
+                        workinghours: Number(0),
+                        totalhours: Number(0),
+                        payrate: Number(employeeToAdd.payRate),
+                        paydate: employeeToAdd.payDate.toJSON(),
+                        isactive: Boolean(true)
+                    }
+                });
+                fetchManagers();
+            }
+
+            // reset values
+            updateEmployeeToAdd({
+                name: "",
+                email: "",
+                workingHours: 0.0,
+                totalHours: 0.0,
+                payRate: 0.25,
+                payDate: new Date(),
+                isActive: true,
+                username: "",
+                password: "",
+                role: ""
+            });
+
+            alert("Employee added successfully!")
+        } catch (error) {
+            console.error("Unable to add employee: " + error);
+            alert("Unable to add employee: " + error.message);
+        }
+
+
+    }
+
+    /** Render UI: navigation, cashiers column, managers column, and add-new form */
+    return (
+    &lt;div>
+        {/* Navigation */}
+        &lt;nav
+        style={{ padding: '10px', backgroundColor: '#f0f0f0' }}
+        role="navigation"
+        aria-label="Main navigation"
+        >
+        &lt;Link to="/manager" style={{ margin: '10px' }}>Manager Home&lt;/Link>
+        &lt;Link to="/employees" style={{ margin: '10px' }}>Employees&lt;/Link>
+        &lt;Link to="/inventory" style={{ margin: '10px' }}>Inventory&lt;/Link>
+        &lt;Link to="/menu" style={{ margin: '10px' }}>Menu&lt;/Link>
+        &lt;Link to="/reports" style={{ margin: '10px' }}>Reports&lt;/Link>
+        &lt;/nav>
+
+        &lt;div className="grid-container">
+        {/* Employees and Managers Columns */}
+        &lt;div className="grid-container" role="region" aria-label="Employees and Managers">
+            &lt;div className="column" role="region" aria-labelledby="cashiers-heading">
+            &lt;h2 id="cashiers-heading">Cashiers&lt;/h2>
+
+            &lt;Dropdown
+                buttonText={selectedEmployee.name || "Select an Employee"}
+                aria-label="Select an employee"
+            >
+                {employees.map((emp, index) => (
+                &lt;DropdownItem key={index} onClick={() => onEmployeeSelect(emp.cashiername)}>
+                    {emp.cashiername}
+                &lt;/DropdownItem>
+                ))}
+            &lt;/Dropdown>
+
+            &lt;table aria-label="Selected employee details">
+                &lt;tbody>
+                &lt;tr>&lt;td>Name:&lt;/td>&lt;td>{selectedEmployee.name}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Email:&lt;/td>&lt;td>{selectedEmployee.email || "(not set)"}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Working Hours:&lt;/td>&lt;td>{selectedEmployee.workingHours}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Total Hours:&lt;/td>&lt;td>{selectedEmployee.totalHours}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Pay Rate:&lt;/td>&lt;td>{selectedEmployee.payRate}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Pay Date:&lt;/td>&lt;td>{selectedEmployee.payDate}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Active?&lt;/td>&lt;td>{selectedEmployee.isActive}&lt;/td>&lt;/tr>
+                &lt;/tbody>
+            &lt;/table>
+
+            &lt;Dropdown buttonText={selectedEmployeeField || "Field to Update"} aria-label="Select field to update">
+                {fields.map((item) => (
+                &lt;DropdownItem key={item} onClick={() => onEmployeeFieldSelect(item)}>
+                    {item}
+                &lt;/DropdownItem>
+                ))}
+            &lt;/Dropdown>
+
+            {selectedEmployeeField &amp;&amp; (
+                &lt;label>
+                New Value:
+                {["Name", "Email"].includes(selectedEmployeeField) &amp;&amp; (
+                    &lt;input
+                    value={newEmployeeStringValue}
+                    onChange={(e) => setNewEmployeeStringValue(e.target.value)}
+                    aria-label={`New ${selectedEmployeeField}`}
+                    />
+                )}
+
+                {["Working Hours", "Total Hours", "Pay Rate"].includes(selectedEmployeeField) &amp;&amp; (
+                    &lt;input
+                    type="number"
+                    value={newEmployeeNumberValue}
+                    onChange={(e) => setNewEmployeeNumberValue(e.target.value)}
+                    min="0.25"
+                    max="100000"
+                    step=".25"
+                    aria-label={`New ${selectedEmployeeField}`}
+                    />
+                )}
+
+                {selectedEmployeeField === "Pay Date" &amp;&amp; (
+                    &lt;DatePicker
+                    selected={newEmployeeDateValue}
+                    onChange={(e) => setNewEmployeeDateValue(e)}
+                    aria-label="Select new pay date"
+                    />
+                )}
+
+                {selectedEmployeeField === "Active?" &amp;&amp; (
+                    &lt;Dropdown buttonText={newEmployeeStringValue || "Select an Option"} aria-label="Select active status">
+                    {["True", "False"].map((item) => (
+                        &lt;DropdownItem key={item} onClick={() => setNewEmployeeStringValue(item)}>
+                        {item}
+                        &lt;/DropdownItem>
+                    ))}
+                    &lt;/Dropdown>
+                )}
+                &lt;/label>
+            )}
+
+            &lt;button className="defaultButton" onClick={onUpdateEmployeeClick} aria-label="Save employee updates">
+                Save
+            &lt;/button>
+
+            &lt;button className="defaultButton" onClick={onMakeManagerClick} aria-label={`Promote ${selectedEmployee.name} to manager`}>
+                Make {selectedEmployee.name} a Manager
+            &lt;/button>
+            &lt;/div>
+
+            &lt;div className="column" role="region" aria-labelledby="managers-heading">
+            &lt;h2 id="managers-heading">Managers&lt;/h2>
+
+            &lt;Dropdown
+                buttonText={selectedManager.name || "Select a Manager"}
+                aria-label="Select a manager"
+            >
+                {managers.map((emp, index) => (
+                &lt;DropdownItem key={index} onClick={() => onManagerSelect(emp.managername)}>
+                    {emp.managername}
+                &lt;/DropdownItem>
+                ))}
+            &lt;/Dropdown>
+
+            &lt;table aria-label="Selected manager details">
+                &lt;tbody>
+                &lt;tr>&lt;td>Name:&lt;/td>&lt;td>{selectedManager.name}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Email:&lt;/td>&lt;td>{selectedManager.email || "(not set)"}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Working Hours:&lt;/td>&lt;td>{selectedManager.workingHours}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Total Hours:&lt;/td>&lt;td>{selectedManager.totalHours}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Pay Rate:&lt;/td>&lt;td>{selectedManager.payRate}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Pay Date:&lt;/td>&lt;td>{selectedManager.payDate}&lt;/td>&lt;/tr>
+                &lt;tr>&lt;td>Active?&lt;/td>&lt;td>{selectedManager.isActive}&lt;/td>&lt;/tr>
+                &lt;/tbody>
+            &lt;/table>
+
+            &lt;Dropdown buttonText={selectedManagerField || "Field to Update"} aria-label="Select manager field to update">
+                {fields.map((item) => (
+                &lt;DropdownItem key={item} onClick={() => onManagerFieldSelect(item)}>
+                    {item}
+                &lt;/DropdownItem>
+                ))}
+            &lt;/Dropdown>
+
+            {selectedManagerField &amp;&amp; (
+                &lt;label>
+                New Value:
+                {["Name", "Email"].includes(selectedManagerField) &amp;&amp; (
+                    &lt;input
+                    value={newManagerStringValue}
+                    onChange={(e) => setNewManagerStringValue(e.target.value)}
+                    aria-label={`New ${selectedManagerField}`}
+                    />
+                )}
+
+                {["Working Hours", "Total Hours", "Pay Rate"].includes(selectedManagerField) &amp;&amp; (
+                    &lt;input
+                    type="number"
+                    value={newManagerNumberValue}
+                    onChange={(e) => setNewManagerNumberValue(e.target.value)}
+                    min="0.25"
+                    max="100000"
+                    step=".25"
+                    aria-label={`New ${selectedManagerField}`}
+                    />
+                )}
+
+                {selectedManagerField === "Pay Date" &amp;&amp; (
+                    &lt;DatePicker
+                    selected={newManagerDateValue}
+                    onChange={(e) => setNewManagerDateValue(e)}
+                    aria-label="Select new pay date"
+                    />
+                )}
+
+                {selectedManagerField === "Active?" &amp;&amp; (
+                    &lt;Dropdown buttonText={newManagerStringValue || "Select an Option"} aria-label="Select active status">
+                    {["True", "False"].map((item) => (
+                        &lt;DropdownItem key={item} onClick={() => setNewManagerStringValue(item)}>
+                        {item}
+                        &lt;/DropdownItem>
+                    ))}
+                    &lt;/Dropdown>
+                )}
+                &lt;/label>
+            )}
+
+            &lt;button className="defaultButton" onClick={onUpdateManagerClick} aria-label="Save manager updates">
+                Save
+            &lt;/button>
+
+            &lt;button className="defaultButton" onClick={onMakeEmployeeClick} aria-label={`Demote ${selectedManager.name} to cashier`}>
+                Make {selectedManager.name} a Cashier
+            &lt;/button>
+            &lt;/div>
+        &lt;/div>
+
+        {/* Add New Employee Section */}
+        &lt;div className="column" role="region" aria-labelledby="add-employee-heading">
+            &lt;h2 id="add-employee-heading">Add a New Employee&lt;/h2>
+
+            &lt;table className="addEmployeeTable" aria-label="Add new employee form">
+            &lt;tbody>
+                &lt;tr>
+                &lt;td>Name:&lt;/td>
+                &lt;td>
+                    &lt;input
+                    value={employeeToAdd.name}
+                    onChange={(e) => updateEmployeeToAdd(prev => ({ ...prev, name: e.target.value }))}
+                    aria-label="New employee name"
+                    />
+                &lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;td>Email:&lt;/td>
+                &lt;td>
+                    &lt;input
+                    value={employeeToAdd.email}
+                    onChange={(e) => updateEmployeeToAdd(prev => ({ ...prev, email: e.target.value }))}
+                    aria-label="New employee email"
+                    />
+                &lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;td>Pay Rate:&lt;/td>
+                &lt;td>
+                    &lt;input
+                    type="number"
+                    value={employeeToAdd.payRate}
+                    onChange={(e) => updateEmployeeToAdd(prev => ({ ...prev, payRate: e.target.value }))}
+                    min="0.25"
+                    max="100"
+                    step=".25"
+                    aria-label="New employee pay rate"
+                    />
+                &lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;td>Pay Date:&lt;/td>
+                &lt;td>
+                    &lt;DatePicker
+                    selected={employeeToAdd.payDate}
+                    onChange={(e) => updateEmployeeToAdd(prev => ({ ...prev, payDate: e }))}
+                    aria-label="New employee pay date"
+                    />
+                &lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;td>Role:&lt;/td>
+                &lt;td>
+                    &lt;Dropdown
+                    buttonText={employeeToAdd.role || "Select a Role"}
+                    aria-label="Select new employee role"
+                    >
+                    {["Cashier", "Manager"].map((item) => (
+                        &lt;DropdownItem key={item} onClick={() => updateEmployeeToAdd(prev => ({ ...prev, role: item }))}>
+                        {item}
+                        &lt;/DropdownItem>
+                    ))}
+                    &lt;/Dropdown>
+                &lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;td>Username:&lt;/td>
+                &lt;td>
+                    &lt;input
+                    value={employeeToAdd.username}
+                    onChange={(e) => updateEmployeeToAdd(prev => ({ ...prev, username: e.target.value }))}
+                    aria-label="New employee username"
+                    />
+                &lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;td>Password:&lt;/td>
+                &lt;td>
+                    &lt;input
+                    value={employeeToAdd.password}
+                    onChange={(e) => updateEmployeeToAdd(prev => ({ ...prev, password: e.target.value }))}
+                    type="password"
+                    aria-label="New employee password"
+                    />
+                &lt;/td>
+                &lt;/tr>
+            &lt;/tbody>
+            &lt;/table>
+
+            &lt;button className="defaultButton" onClick={addNewEmployee} aria-label="Add new employee">
+            Save
+            &lt;/button>
+        &lt;/div>
+        &lt;/div>
+    &lt;/div>
+    );
+}
+
+export default Employees;</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

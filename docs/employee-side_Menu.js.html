@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/Menu.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/Menu.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import { Link } from 'react-router-dom';
+import React from 'react';
+import "./Menu.css";
+import Dropdown from "../components/Dropdown/Dropdown.js";
+import DropdownItem from "../components/Dropdown/DropdownItem.js";
+import client from './clientConnection.js';
+
+/**
+ * Menu component: provides UI and logic to manage menu items and meal options.
+ *
+ * - Loads menu and inventory data via `client`.
+ * - Supports viewing/updating meal options and menu items, creating new menu items,
+ *   and composing menu ingredients from inventory entries.
+ *
+ * @returns {JSX.Element}
+ */
+function Menu() {
+    /** Meal option field labels used in dropdowns */
+    const mealOptionFields = ["Name", "Price"];
+
+    /**
+     * Meal option names (filtered by mealtype === 'M')
+     * @type {Array&lt;string>}
+     */
+    const [mealOptions, setMealOptions] = React.useState([]);
+
+    /**
+     * Selected meal option details shown in the UI
+     * @type {{id:number,itemname:string,price:number}}
+     */
+    const [selectedMealOption, updateSelectedMealOption] = React.useState ({
+        id: -1,
+        itemname: "Select a Meal Option",
+        price: 0.0,
+    });
+
+    /** Which field on the selected meal option is being edited */
+    const [selectedMealOptionField, updateSelectedMealOptionField] = React.useState("Field to Update");
+
+    /** Temporary new value for the selected meal option field */
+    const [newMealOptionValue, setNewMealOptionValue] = React.useState("");
+
+    /** Menu item field labels used in dropdowns */
+    const menuItemFields = ["Name", "Price", "Active?"];
+
+    /**
+     * Menu item names (excluding meal options)
+     * @type {Array&lt;string>}
+     */
+    const [menuItems, setMenuItems] = React.useState([]);
+
+    /**
+     * Selected menu item details shown in the UI
+     * @type {{id:number,itemname:string,price:number,isactive:boolean}}
+     */
+    const [selectedMenuItem, updateSelectedMenuItem] = React.useState ({
+        id: -1,
+        itemname: "Select a Menu Item",
+        price: 0.0,
+        isactive: false
+    });
+
+    /** Which field on the selected menu item is being edited */
+    const [selectedMenuItemField, updateSelectedMenuItemField] = React.useState("Field to Update");
+
+    /** Temporary new value for the selected menu item field */
+    const [newMenuItemValue, setNewMenuItemValue] = React.useState("");
+
+    /**
+     * Select a meal option by name. Triggers the effect that loads full details.
+     * @param {string} name
+     * @returns {void}
+     */
+    const onMealOptionSelect = (name) => {
+        updateSelectedMealOption({
+            itemname: name,
+        })
+    }
+
+    /** Select which field of the meal option will be edited */
+    const onMealOptionFieldSelect = (name) => {
+        updateSelectedMealOptionField(name);
+    }
+
+    /** Load meal option names (mealtype === 'M') on mount */
+    React.useEffect(() => {
+        const fetchItems = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "menu",
+                    columns: ["itemname", "mealtype"],
+                });
+                const meals = data.filter(item => item.mealtype === "M");
+                const names = meals.map(item => item.itemname);
+                setMealOptions(names);
+            } catch (error) {
+                console.error("An error occurred:", error.message);
+                setMealOptions(["Unable to load items"]);
+            }
+        };
+
+        fetchItems();
+    }, []);
+
+    /**
+     * When `selectedMealOption.itemname` changes, fetch full details for that meal option
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        if (!selectedMealOption.itemname || selectedMealOption.itemname === "Select a Meal Option") return; // do nothing if no selection
+
+        const fetchItemDetails = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "menu",
+                    columns: ["id", "itemname", "price"],
+                });
+
+                // Filter the result for the selected Item
+                const itm = data.find(e => e.itemname === selectedMealOption.itemname);
+
+                if (itm) {
+                    updateSelectedMealOption({
+                        id: itm.id ?? -1,
+                        itemname: itm.itemname ?? "",
+                        price: itm.price ?? 0.0,
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to fetch item details:", error.message);
+            }
+        };
+
+        fetchItemDetails();
+    }, [selectedMealOption.itemname]);
+
+    /**
+     * Validate and submit an update for the selected meal option
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onUpdateMealOptionClick = async () => {
+        if (!selectedMealOption.itemname || !selectedMealOptionField || newMealOptionValue === "") {
+            alert("Please select an item, a field, and enter a new value");
+            return;
+        }
+
+        try {
+            // Map field names to database column names
+            const columnMap = {
+                "Name": "itemname",
+                "Price": "price",
+            };
+
+            const column = columnMap[selectedMealOptionField];
+
+            if (!column) throw new Error("Invalid field selected");
+            
+            // Explicit type conversion if necessary
+            let valueToSet;
+            if (column === "price") {
+                valueToSet = Number(newMealOptionValue);
+            } else {
+                valueToSet = newMealOptionValue;
+            }
+
+            await client.genericTableSet({
+                table: "menu",
+                column: column,
+                value: valueToSet,
+                id: selectedMealOption.id 
+            });
+
+            alert("Item updated successfully!");
+
+            const updatedData = await client.genericTableGet({
+                table: "menu",
+                columns: ["id", "itemname", "price"],
+                id: selectedMealOption.id
+            });
+
+            if (updatedData &amp;&amp; updatedData.length > 0) {
+                const itm = updatedData[0];
+                updateSelectedMealOption({
+                    id: itm.id ?? -1,
+                    itemname: itm.itemname ?? "",
+                    price: itm.price ?? 0.0,
+                });
+            }
+        } catch (error) {
+            console.error("Failed to update item:", error);
+            alert("Failed to update item: " + error.message);
+        }
+    }
+
+    /**
+     * Select a menu item by name; triggers the effect that loads full details.
+     * @param {string} name
+     * @returns {void}
+     */
+    const onMenuItemSelect = (name) => {
+        updateSelectedMenuItem({
+            itemname: name,
+            isactive: false
+        })
+    }
+
+    /** Select which field of the menu item will be edited */
+    const onMenuItemFieldSelect = (name) => {
+        updateSelectedMenuItemField(name);
+    }
+
+    /** Load menu item names (non-meal options) on mount */
+    React.useEffect(() => {
+        const fetchItems = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "menu",
+                    columns: ["itemname", "mealtype"],
+                });
+                const meals = data.filter(item => item.mealtype !== "M");
+                console.log(JSON.stringify(meals));
+                const names = meals.map(item => item.itemname);
+                console.log(JSON.stringify(names));
+                setMenuItems(names);
+            } catch (error) {
+                console.error("An error occurred:", error.message);
+                setMenuItems(["Unable to load items"]);
+            }
+        };
+
+        fetchItems();
+    }, []);
+
+    /**
+     * When `selectedMenuItem.itemname` changes, fetch full details for that menu item
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        if (!selectedMenuItem.itemname || selectedMenuItem.itemname === "Select a Menu Item") return; // do nothing if no selection
+        const fetchItemDetails = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "menu",
+                    columns: ["id", "itemname", "price", "isactive"],
+                });
+
+                // Filter the result for the selected Item
+                const itm = data.find(e => e.itemname === selectedMenuItem.itemname);
+
+                if (itm) {
+                    updateSelectedMenuItem({
+                        id: itm.id ?? -1,
+                        itemname: itm.itemname ?? "",
+                        price: itm.price ?? 0.0,
+                        isactive: itm.isactive ?? false
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to fetch item details:", error.message);
+            }
+        };
+
+        fetchItemDetails();
+    }, [selectedMenuItem.itemname]);
+
+    /**
+     * Validate and submit an update for the selected menu item
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onUpdateMenuItemClick = async () => {
+        if (!selectedMenuItem.itemname || !selectedMenuItemField || newMenuItemValue === "") {
+            alert("Please select an item, a field, and enter a new value");
+            return;
+        }
+
+        try {
+            // Map field names to database column names
+            const columnMap = {
+                "Name": "itemname",
+                "Price": "price",
+                "Active?": "isactive"
+            };
+
+            const column = columnMap[selectedMenuItemField];
+
+            if (!column) throw new Error("Invalid field selected");
+            
+            // Explicit type conversion if necessary
+            let valueToSet;
+            if (column === "price") {
+                valueToSet = Number(newMenuItemValue);
+            } else {
+                valueToSet = newMenuItemValue;
+            }
+
+            await client.genericTableSet({
+                table: "menu",
+                column: column,
+                value: valueToSet,
+                id: selectedMenuItem.id 
+            });
+
+            alert("Item updated successfully!");
+
+            const updatedData = await client.genericTableGet({
+                table: "menu",
+                columns: ["id", "itemname", "price", "isactive"],
+                id: selectedMenuItem.id
+            });
+
+            if (updatedData &amp;&amp; updatedData.length > 0) {
+                const itm = updatedData[0];
+                updateSelectedMenuItem({
+                    id: itm.id ?? -1,
+                    itemname: itm.itemname ?? "",
+                    price: itm.price ?? 0.0,
+                    isactive: itm.isactive ?? false
+                });
+            }
+        } catch (error) {
+            console.error("Failed to update item:", error);
+            alert("Failed to update item: " + error.message);
+        }
+    }
+
+
+    /** Menu item type options for the Create form */
+    const itemTypes = ["Appetizer", "Drink", "Entree", "Side"];
+
+    /** New menu item form fields */
+    const [newItemName, setNewItemName] = React.useState("");
+    const [newItemPrice, setNewItemPrice] = React.useState(0);
+    const [newItemIsActive, setNewItemIsActive] = React.useState(false);
+    const [newItemType, setNewItemType] = React.useState("");
+
+    /** Inventory ingredient list used for selecting ingredients */
+    const [ingredients, setIngredients] = React.useState([]);
+
+    /** Ingredients added to the new menu item (array of {name,quantity}) */
+    const [addedIngredients, setAddedIngredients] = React.useState([]);
+
+    /** Load inventory item names for ingredient selection on mount */
+    React.useEffect(() => {
+        const fetchItems = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "inventory",
+                    columns: ["itemname"]
+                });
+
+                setIngredients(data);
+            } catch (error) {
+                console.error("An error occurred:", error.message);
+                setIngredients(["Unable to load items"]);
+            }
+        };
+
+        fetchItems();
+    }, []);
+
+    /** Add a blank ingredient row to the Create form */
+    const addIngredient = () => {
+        setAddedIngredients(prev => [
+            ...prev,
+            { name: "", quantity: 0 }
+        ]);
+    };
+
+    /** Update an added ingredient's field (name or quantity) */
+    const updateIngredient = (index, field, value) => {
+        const updated = [...addedIngredients];
+        updated[index] = {
+            ...updated[index],
+            [field]: value
+        };
+        setAddedIngredients(updated);
+    };
+
+    /**
+     * Save a new menu item and its ingredients to the database
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onSaveNewItemClick = async () => {
+        console.log("Hi");
+        if (!newItemName || newItemPrice === 0 || !newItemIsActive || !newItemType) return;
+        console.log("1");
+        for (let i of addedIngredients) {
+            if (!i.name || i.quantity === 0) {
+                console.log(i.name);
+                console.log(i.quantity);
+                console.log(i);
+                return;
+            }
+        }
+        console.log("2");
+
+        const typeMap = {
+            "Appetizer": 'A',
+            "Drink": 'D',
+            "Entree": 'E',
+            "Side": 'S'
+        };
+        const typeToSet = typeMap[newItemType];
+
+        try {
+            const result = await client.genericTableCreate({
+                table: "menu",
+                values: {
+                    itemname: newItemName,
+                    price: Number(newItemPrice),
+                    mealtype: typeToSet,
+                    isactive: Boolean(newItemIsActive)
+                }
+            });
+
+            for (let i of addedIngredients) {
+                const data = await client.genericTableGet({
+                    table: "inventory",
+                    columns: ["id", "itemname"],
+                });
+                const itemEntry = data.find(e => e.itemname === i.name);
+
+                await client.genericTableCreate({
+                    table: "menuingredients",
+                    values: {
+                        menu_id: result.id,
+                        inventory_id: itemEntry.id,
+                        quantity: Number(i.quantity)
+                    }
+                });
+            }
+
+            alert("Item added successfully!");
+        } catch (error) {
+            console.error("Failed to add item:", error);
+            alert("Failed to add item: " + error.message);
+        }
+
+    }
+
+ return (
+  &lt;div>
+    {/* Navigation */}
+    &lt;nav
+      style={{ padding: '10px', backgroundColor: '#f0f0f0' }}
+      role="navigation"
+      aria-label="Manager navigation"
+    >
+      &lt;Link to="/manager" style={{ margin: '10px' }}>Manager Home&lt;/Link>
+      &lt;Link to="/employees" style={{ margin: '10px' }}>Employees&lt;/Link>
+      &lt;Link to="/inventory" style={{ margin: '10px' }}>Inventory&lt;/Link>
+      &lt;Link to="/menu" style={{ margin: '10px' }}>Menu&lt;/Link>
+      &lt;Link to="/reports" style={{ margin: '10px' }}>Reports&lt;/Link>
+    &lt;/nav>
+
+    &lt;div className="grid-container">
+      {/* Meal Options &amp; Menu Items */}
+      &lt;div className="row" role="region" aria-labelledby="meal-menu-heading">
+        &lt;h2 id="meal-menu-heading" className="sr-only">Meal Options and Menu Items Management&lt;/h2>
+        &lt;div className="nested-grid-container">
+
+          {/* Meal Options */}
+          &lt;div className="column" role="region" aria-labelledby="meal-options-heading">
+            &lt;h2 id="meal-options-heading">Meal Options&lt;/h2>
+
+            &lt;Dropdown buttonText={selectedMealOption.itemname} aria-label="Select Meal Option">
+              {mealOptions.map((itm, index) => (
+                &lt;DropdownItem key={index} onClick={() => onMealOptionSelect(itm)}>
+                  {itm}
+                &lt;/DropdownItem>
+              ))}
+            &lt;/Dropdown>
+
+            &lt;table aria-label="Selected Meal Option details">
+              &lt;tbody>
+                &lt;tr>
+                  &lt;td>Name:&lt;/td>
+                  &lt;td>{selectedMealOption.itemname}&lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                  &lt;td>Price:&lt;/td>
+                  &lt;td>{selectedMealOption.price}&lt;/td>
+                &lt;/tr>
+              &lt;/tbody>
+            &lt;/table>
+
+            &lt;Dropdown buttonText={selectedMealOptionField} aria-label="Select field to update for Meal Option">
+              {mealOptionFields.map((field) => (
+                &lt;DropdownItem key={field} onClick={() => onMealOptionFieldSelect(field)}>
+                  {field}
+                &lt;/DropdownItem>
+              ))}
+            &lt;/Dropdown>
+            &lt;label>
+              New Value:
+              &lt;input
+                aria-label="New value for selected Meal Option field"
+                value={newMealOptionValue}
+                onChange={(e) => setNewMealOptionValue(e.target.value)}
+              />
+            &lt;/label>
+            &lt;button className="defaultButton" onClick={onUpdateMealOptionClick}>
+              Save
+            &lt;/button>
+          &lt;/div>
+
+          {/* Menu Items */}
+          &lt;div className="column" role="region" aria-labelledby="menu-items-heading">
+            &lt;h2 id="menu-items-heading">Menu Items&lt;/h2>
+
+            &lt;Dropdown buttonText={selectedMenuItem.itemname} aria-label="Select Menu Item">
+              {menuItems.map((itm, index) => (
+                &lt;DropdownItem key={index} onClick={() => onMenuItemSelect(itm)}>
+                  {itm}
+                &lt;/DropdownItem>
+              ))}
+            &lt;/Dropdown>
+
+            &lt;table aria-label="Selected Menu Item details">
+              &lt;tbody>
+                &lt;tr>
+                  &lt;td>Name:&lt;/td>
+                  &lt;td>{selectedMenuItem.itemname}&lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                  &lt;td>Price:&lt;/td>
+                  &lt;td>{selectedMenuItem.price}&lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                  &lt;td>Active?&lt;/td>
+                  &lt;td>{selectedMenuItem.isactive.toString() || ""}&lt;/td>
+                &lt;/tr>
+              &lt;/tbody>
+            &lt;/table>
+
+            &lt;Dropdown buttonText={selectedMenuItemField} aria-label="Select field to update for Menu Item">
+              {menuItemFields.map((field) => (
+                &lt;DropdownItem key={field} onClick={() => onMenuItemFieldSelect(field)}>
+                  {field}
+                &lt;/DropdownItem>
+              ))}
+            &lt;/Dropdown>
+            &lt;label>
+              New Value:
+              &lt;input
+                aria-label="New value for selected Menu Item field"
+                value={newMenuItemValue}
+                onChange={(e) => setNewMenuItemValue(e.target.value)}
+              />
+            &lt;/label>
+            &lt;button className="defaultButton" onClick={onUpdateMenuItemClick}>
+              Save
+            &lt;/button>
+          &lt;/div>
+
+        &lt;/div>
+      &lt;/div>
+
+      {/* Create New Menu Item */}
+      &lt;div className="row" role="region" aria-labelledby="create-menu-item-heading">
+        &lt;h2 id="create-menu-item-heading">Create a New Menu Item&lt;/h2>
+
+        &lt;div className="addItemRow">
+          &lt;label>
+            Name:
+            &lt;input
+              aria-label="New menu item name"
+              value={newItemName}
+              onChange={(e) => setNewItemName(e.target.value)}
+            />
+          &lt;/label>
+
+          &lt;label>
+            Price:
+            &lt;input
+              aria-label="New menu item price"
+              type="number"
+              value={newItemPrice}
+              onChange={(e) => setNewItemPrice(Number(e.target.value))}
+              min="0"
+              max="100"
+              step=".25"
+            />
+          &lt;/label>
+
+          &lt;Dropdown buttonText={newItemIsActive || "Active?"} aria-label="Set active status for new menu item">
+            {["true", "false"].map((val) => (
+              &lt;DropdownItem key={val} onClick={() => setNewItemIsActive(val)}>
+                {val}
+              &lt;/DropdownItem>
+            ))}
+          &lt;/Dropdown>
+
+          &lt;Dropdown buttonText={newItemType || "Select Type"} aria-label="Select type for new menu item">
+            {itemTypes.map((type) => (
+              &lt;DropdownItem key={type} onClick={() => setNewItemType(type)}>
+                {type}
+              &lt;/DropdownItem>
+            ))}
+          &lt;/Dropdown>
+        &lt;/div>
+
+        &lt;button className="defaultButton" onClick={addIngredient} aria-label="Add a new ingredient">
+          Add Ingredient
+        &lt;/button>
+
+        {addedIngredients.map((ingredient, index) => (
+          &lt;div className="addItemRow" key={index} role="group" aria-labelledby={`ingredient-${index}-heading`}>
+            &lt;h4 id={`ingredient-${index}-heading`}>Ingredient #{index + 1}&lt;/h4>
+
+            &lt;Dropdown
+              buttonText={ingredient.name || "Select Ingredient"}
+              aria-label={`Select name for ingredient #${index + 1}`}
+            >
+              {ingredients.map((itm, idx) => (
+                &lt;DropdownItem key={idx} onClick={() => updateIngredient(index, "name", itm.itemname)}>
+                  {itm.itemname}
+                &lt;/DropdownItem>
+              ))}
+            &lt;/Dropdown>
+
+            &lt;label>
+              Quantity:
+              &lt;input
+                type="number"
+                aria-label={`Quantity for ingredient #${index + 1}`}
+                value={ingredient.quantity}
+                onChange={(e) => updateIngredient(index, "quantity", e.target.value)}
+                min="0"
+                max="1000"
+                step="1"
+              />
+            &lt;/label>
+          &lt;/div>
+        ))}
+
+        &lt;button
+          className="defaultButton"
+          style={{ marginTop: "20px" }}
+          onClick={onSaveNewItemClick}
+          aria-label="Save the new menu item"
+        >
+          Save New Menu Item
+        &lt;/button>
+      &lt;/div>
+    &lt;/div>
+  &lt;/div>
+);
+
+}
+
+export default Menu;</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

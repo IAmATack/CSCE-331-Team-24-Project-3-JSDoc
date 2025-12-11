@@ -1,0 +1,1429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/serverLogic.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/serverLogic.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Application logic layer.
+ *
+ * Responsibilities:
+ * - Validate request inputs and enforce schema/typing for tables.
+ * - Compose and execute SQL via the database access layer.
+ * - Implement business operations: reports, authentication, orders, and helpers.
+ * - Expose methods consumed by HTTP routes.
+ * - Prefer parameterized queries and defensive checks; return structured errors.
+ */
+import { DatabaseAccess } from './databaseAccess.js';
+import { pool } from './db.js';
+import { ErrorCodes, getErrorCodeName } from './errorCodes.js';
+import argon2 from "argon2";
+
+/**
+ * ServerLogic - business logic layer that composes DatabaseAccess.
+ * Keeps DB queries isolated in DatabaseAccess and exposes higher-level
+ * operations to the HTTP layer.
+ */
+export class ServerLogic {
+  constructor(db = null) { 
+    this.db = db || new DatabaseAccess();
+    this.allowedTables = {}; // Will be populated by initialize()
+    this.columnTypes = {}; // Will store data types: { tableName: { columnName: dataType } }
+    this.schemaInitialized = false;
+  }
+
+  /**
+   * Initialize the server logic by loading database schema
+   * Should be called once when the server starts
+   */
+  async initialize() {
+    /**
+     * Load table/column schema from the database and cache it.
+     * Populates internal maps for allowed tables and column types.
+     * Should be invoked once on server startup before using logic methods.
+     * @returns {Promise&lt;void>}
+     */
+    console.log("Initializing ServerLogic: Loading database schema...");
+    
+    const schemaRows = await this.db.getTableSchema();
+    
+    // Build allowedTables object: { tableName: [column1, column2, ...] }
+    // Build columnTypes object: { tableName: { columnName: dataType } }
+    this.allowedTables = {};
+    this.columnTypes = {};
+    for (const row of schemaRows) {
+      const tableName = row.table_name;
+      const columnName = row.column_name;
+      const dataType = row.data_type;
+      
+      if (!this.allowedTables[tableName]) {
+        this.allowedTables[tableName] = [];
+        this.columnTypes[tableName] = {};
+      }
+      
+      this.allowedTables[tableName].push(columnName);
+      this.columnTypes[tableName][columnName] = dataType;
+    }
+    
+    this.schemaInitialized = true;
+    console.log(`Schema initialized: ${Object.keys(this.allowedTables).length} tables loaded`);
+    console.log("Available tables:", Object.keys(this.allowedTables).join(', '));
+  }
+
+  /**
+   * Verify connectivity to the database.
+   * @returns {Promise&lt;boolean>} True when a simple query succeeds.
+   */
+  async getDatabaseStatus() { return this.db.getDatabaseStatus(); }
+
+  /**
+   * Get the database schema information
+   * @param {string|null} table - Optional table name to get schema for specific table
+   * @returns {Object} Schema information with tables, columns, and data types
+   */
+  getTableSchema(table = null) {
+    if (!this.schemaInitialized) {
+      const error = "ServerLogic not initialized. Call initialize() first.";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    if (table) {
+      // Return schema for specific table
+      if (!this.allowedTables[table]) {
+        const error = `Table '${table}' not found. Available tables: ${Object.keys(this.allowedTables).join(', ')}`;
+        console.error('❌ ServerLogic Error:', error);
+        throw new Error(error);
+      }
+      
+      return {
+        table,
+        columns: this.allowedTables[table].map(columnName => ({
+          name: columnName,
+          type: this.columnTypes[table][columnName]
+        }))
+      };
+    }
+
+    // Return schema for all tables
+    return Object.keys(this.allowedTables).reduce((schema, tableName) => {
+      schema[tableName] = {
+        columns: this.allowedTables[tableName].map(columnName => ({
+          name: columnName,
+          type: this.columnTypes[tableName][columnName]
+        }))
+      };
+      return schema;
+    }, {});
+  }
+  
+  /**
+   * Generic table query with dynamic schema validation
+   * @param {string} table - Table name to query (REQUIRED)
+   * @param {string[]} columns - Array of column names (empty array = all columns)
+   * @param {number|string|null} id - Optional ID value to filter by (null = all rows)
+   * @returns {Promise&lt;Array>} Query results
+   */
+  async genericTableGet(table, columns = [], id = null) {
+    /**
+     * Retrieve rows from a table using optional column selection and id filter.
+     * Validates table/column names and builds a parameterized query.
+     * @param {string} table - Target table name.
+     * @param {string[]} columns - Column list to select; empty selects all.
+     * @param {number|string|null} id - Optional primary id filter.
+     * @returns {Promise&lt;Array&lt;object>>} Result rows.
+     */
+    // Check if schema is initialized
+    if (!this.schemaInitialized) { 
+      const error = "ServerLogic not initialized. Call initialize() first.";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    // Validate table is provided
+    if (!table || typeof table !== 'string') { 
+      const error = "Table parameter is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    // Validate table exists in schema
+    if (!this.allowedTables[table]) {
+      const error = `Invalid table: ${table}. Allowed tables: ${Object.keys(this.allowedTables).join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    const allowedColumns = this.allowedTables[table];
+
+    // Determine columns to select
+    let columnList = '*';
+    if (columns &amp;&amp; columns.length > 0) {
+      const validColumns = columns.filter(col => allowedColumns.includes(col));
+      
+      if (validColumns.length === 0) {
+        const error = `Invalid columns for ${table}. Allowed: ${allowedColumns.join(', ')}`;
+        console.error('❌ ServerLogic Error:', error);
+        throw new Error(error);
+      }
+      
+      columnList = validColumns.join(', ');
+    }
+
+    // Build query with parameterized WHERE clause for ID
+    let query = `SELECT ${columnList} FROM ${table}`;
+    const queryParams = [];
+
+    // Add WHERE clause if ID is provided
+    if (id !== null &amp;&amp; id !== undefined &amp;&amp; id !== '') {
+      // Check if table has an 'id' column
+      if (!allowedColumns.includes('id')) {
+        const error = `Table ${table} does not have an 'id' column. Available columns: ${allowedColumns.join(', ')}`;
+        console.error('❌ ServerLogic Error:', error);
+        throw new Error(error);
+      }
+
+      query += ` WHERE id = $1`;
+      queryParams.push(id);
+    }
+
+    query += ';';
+
+    // Execute the validated query
+    return this.db.genericTableGet(query, queryParams);
+  }
+
+  /**
+   * Generic table update with dynamic schema validation
+   * @param {string} table - Table name to update (REQUIRED)
+   * @param {string} column - Column name to update (REQUIRED)
+   * @param {any} value - New value for the column (REQUIRED)
+   * @param {number|string} id - ID of the row to update (REQUIRED)
+   * @returns {Promise&lt;Object>} Updated row
+   */
+  async genericTableSet(table, column, value, id) {
+    /**
+     * Update a single column on a row identified by id.
+     * Validates table/column existence and type compatibility.
+     * @param {string} table - Target table.
+     * @param {string} column - Column to update.
+     * @param {any} value - New value; hashes when updating password.
+     * @param {number|string} id - Row identifier.
+     * @returns {Promise&lt;object>} Updated row.
+     */
+    // Check if schema is initialized
+    if (!this.schemaInitialized) { 
+      const error = "ServerLogic not initialized. Call initialize() first.";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    // Validate table is provided
+    if (!table || typeof table !== 'string') { 
+      const error = "Table parameter is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate table exists in schema
+    if (!this.allowedTables[table]) {
+      const error = `Invalid table: ${table}. Allowed tables: ${Object.keys(this.allowedTables).join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    const allowedColumns = this.allowedTables[table];
+
+    // Validate column is provided and exists
+    if (!column || typeof column !== 'string') { 
+      const error = "Column parameter is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    if (!allowedColumns.includes(column)) {
+      const error = `Invalid column: ${column} for table ${table}. Allowed columns: ${allowedColumns.join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate ID is provided
+    if (id === null || id === undefined || id === '') {
+      const error = "ID parameter is required for update operations";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Check if table has an 'id' column
+    if (!allowedColumns.includes('id')) {
+      const error = `Table ${table} does not have an 'id' column. Available columns: ${allowedColumns.join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate value is provided (allow 0, false, empty string as valid values)
+    if (value === null || value === undefined) {
+      const error = "Value parameter is required";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Hash when the password column is being updated
+    if (column === "_password") {
+        value = await argon2.hash(value);
+    }
+
+    // Validate data type matches column type
+    const expectedType = this.columnTypes[table][column];
+    const validationError = this._validateColumnType(column, value, expectedType);
+    if (validationError) {
+      const error = `Type validation failed for ${table}.${column}:\n${validationError}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Build parameterized UPDATE query
+    const query = `UPDATE ${table} SET ${column} = $1 WHERE id = $2 RETURNING *;`;
+    const queryParams = [value, id];
+
+    // Execute the validated query
+    return this.db.genericTableSet(query, queryParams);
+  }
+
+  /**
+   * Generic table update with dynamic schema validation
+   * Does not update password
+   * Helper for employeeMove
+   * @param {string} table - Table name to update (REQUIRED)
+   * @param {string} column - Column name to update (REQUIRED)
+   * @param {any} value - New value for the column (REQUIRED)
+   * @param {number|string} id - ID of the row to update (REQUIRED)
+   * @returns {Promise&lt;Object>} Updated row
+   */
+  async genericTableSetPassword(table, column, value, id) {
+    // Check if schema is initialized
+    if (!this.schemaInitialized) { 
+      const error = "ServerLogic not initialized. Call initialize() first.";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    // Validate table is provided
+    if (!table || typeof table !== 'string') { 
+      const error = "Table parameter is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate table exists in schema
+    if (!this.allowedTables[table]) {
+      const error = `Invalid table: ${table}. Allowed tables: ${Object.keys(this.allowedTables).join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    const allowedColumns = this.allowedTables[table];
+
+    // Validate column is provided and exists
+    if (!column || typeof column !== 'string') { 
+      const error = "Column parameter is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    if (!allowedColumns.includes(column)) {
+      const error = `Invalid column: ${column} for table ${table}. Allowed columns: ${allowedColumns.join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate ID is provided
+    if (id === null || id === undefined || id === '') {
+      const error = "ID parameter is required for update operations";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Check if table has an 'id' column
+    if (!allowedColumns.includes('id')) {
+      const error = `Table ${table} does not have an 'id' column. Available columns: ${allowedColumns.join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate value is provided (allow 0, false, empty string as valid values)
+    if (value === null || value === undefined) {
+      const error = "Value parameter is required";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate data type matches column type
+    const expectedType = this.columnTypes[table][column];
+    const validationError = this._validateColumnType(column, value, expectedType);
+    if (validationError) {
+      const error = `Type validation failed for ${table}.${column}:\n${validationError}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Build parameterized UPDATE query
+    const query = `UPDATE ${table} SET ${column} = $1 WHERE id = $2 RETURNING *;`;
+    const queryParams = [value, id];
+
+    // Execute the validated query
+    return this.db.genericTableSet(query, queryParams);
+  }
+
+  /**
+   * Generic table adder with dynamic schema validation - adds a value to a numeric column
+   * @param {string} table - Table name to update (REQUIRED)
+   * @param {string} column - Column name to add to (REQUIRED, must be numeric type)
+   * @param {number} value - Value to add to the column (REQUIRED, must be a number)
+   * @param {number|string} id - ID of the row to update (REQUIRED)
+   * @returns {Promise&lt;Object>} Updated row
+   */
+
+  /**
+   * Generic table create with dynamic schema validation - inserts a new row
+   * @param {string} table - Table name to insert into (REQUIRED)
+   * @param {Object} values - Object with column-value pairs (REQUIRED)
+   * @returns {Promise&lt;Object>} Created row
+   */
+  async genericTableCreate(table, values) {
+    /**
+     * Insert a row into a table using provided column-value pairs.
+     * Validates table and columns, performs type checks and parameterized insert.
+     * @param {string} table - Target table.
+     * @param {Object&lt;string, any>} values - Column-value pairs to insert.
+     * @returns {Promise&lt;object>} Created row or metadata.
+     */
+    const errorDetails = {
+      table: table || 'NOT PROVIDED',
+      valuesProvided: values ? Object.keys(values).length : 0,
+      issues: []
+    };
+
+    // Check if schema is initialized
+    if (!this.schemaInitialized) { 
+      errorDetails.issues.push('ServerLogic not initialized. Call initialize() first.');
+      const error = new Error(`[VALIDATION] ${errorDetails.issues.join('; ')}`);
+      error.errorCode = ErrorCodes.VAL_INIT_ERROR;
+      error.errorCodeName = 'VAL_INIT_ERROR';
+      error.errorType = 'VALIDATION';
+      console.error('❌ [genericTableCreate] Validation failed:', error.message);
+      console.error('   Error Code:', error.errorCode, `(${error.errorCodeName})`);
+      throw error;
+    }
+    
+    // Validate table is provided
+    if (!table || typeof table !== 'string') { 
+      errorDetails.issues.push(`Table parameter is required and must be a string (got: ${typeof table})`);
+      const error = new Error(`[VALIDATION] ${errorDetails.issues.join('; ')}`);
+      error.errorCode = ErrorCodes.VAL_MISSING_TABLE;
+      error.errorCodeName = 'VAL_MISSING_TABLE';
+      error.errorType = 'VALIDATION';
+      console.error('❌ [genericTableCreate] Validation failed:', error.message);
+      console.error('   Error Code:', error.errorCode, `(${error.errorCodeName})`);
+      throw error;
+    }
+
+    // Validate table exists in schema
+    if (!this.allowedTables[table]) {
+      errorDetails.issues.push(`Table '${table}' does not exist. Available tables: ${Object.keys(this.allowedTables).join(', ')}`);
+      const error = new Error(`[VALIDATION] ${errorDetails.issues.join('; ')}`);
+      error.errorCode = ErrorCodes.VAL_TABLE_NOT_FOUND;
+      error.errorCodeName = 'VAL_TABLE_NOT_FOUND';
+      error.errorType = 'VALIDATION';
+      console.error('❌ [genericTableCreate] Validation failed:', error.message);
+      console.error('   Error Code:', error.errorCode, `(${error.errorCodeName})`);
+      throw error;
+    }
+
+    const allowedColumns = this.allowedTables[table];
+
+    // Validate values is provided and is an object
+    if (!values || typeof values !== 'object' || Array.isArray(values)) {
+      errorDetails.issues.push(`Values parameter is required and must be an object (got: ${typeof values}${Array.isArray(values) ? ' (array)' : ''})`);
+      const error = new Error(`[VALIDATION] ${errorDetails.issues.join('; ')}`);
+      error.errorCode = ErrorCodes.VAL_INVALID_VALUES;
+      error.errorCodeName = 'VAL_INVALID_VALUES';
+      error.errorType = 'VALIDATION';
+      console.error('❌ [genericTableCreate] Validation failed:', error.message);
+      console.error('   Error Code:', error.errorCode, `(${error.errorCodeName})`);
+      throw error;
+    }
+
+    const columns = Object.keys(values);
+    
+    if (columns.length === 0) {
+      errorDetails.issues.push('Values object must contain at least one column-value pair');
+      const error = new Error(`[VALIDATION] ${errorDetails.issues.join('; ')}`);
+      error.errorCode = ErrorCodes.VAL_EMPTY_VALUES;
+      error.errorCodeName = 'VAL_EMPTY_VALUES';
+      error.errorType = 'VALIDATION';
+      console.error('❌ [genericTableCreate] Validation failed:', error.message);
+      console.error('   Error Code:', error.errorCode, `(${error.errorCodeName})`);
+      throw error;
+    }
+
+    // Validate all columns exist in the table
+    const invalidColumns = columns.filter(col => !allowedColumns.includes(col));
+    if (invalidColumns.length > 0) {
+      errorDetails.issues.push(`Invalid column(s) for table '${table}': ${invalidColumns.join(', ')}. Valid columns: ${allowedColumns.join(', ')}`);
+      const error = new Error(`[VALIDATION] ${errorDetails.issues.join('; ')}`);
+      error.errorCode = ErrorCodes.VAL_INVALID_COLUMNS;
+      error.errorCodeName = 'VAL_INVALID_COLUMNS';
+      error.errorType = 'VALIDATION';
+      console.error('❌ [genericTableCreate] Validation failed:', error.message);
+      console.error('   Error Code:', error.errorCode, `(${error.errorCodeName})`);
+      throw error;
+    }
+
+    // Check for missing required columns (NOT NULL constraints)
+    // Note: We can't fully validate this without checking DB constraints, but we can warn about common patterns
+    const providedColumnsSet = new Set(columns);
+    const missingCommonRequired = [];
+    if (allowedColumns.includes('itemname') &amp;&amp; !providedColumnsSet.has('itemname') &amp;&amp; table === 'menu') {
+      missingCommonRequired.push('itemname');
+    }
+    if (allowedColumns.includes('price') &amp;&amp; !providedColumnsSet.has('price') &amp;&amp; table === 'menu') {
+      missingCommonRequired.push('price');
+    }
+    if (missingCommonRequired.length > 0) {
+      errorDetails.issues.push(`Missing potentially required column(s) for table '${table}': ${missingCommonRequired.join(', ')}`);
+    }
+
+    // hash password for comparison
+    if (values._password) {
+        values._password = await argon2.hash(values._password);
+    }
+
+    // Validate data types for each column value
+    const typeErrors = [];
+    for (const col of columns) {
+      const value = values[col];
+      const expectedType = this.columnTypes[table][col];
+      const validationError = this._validateColumnType(col, value, expectedType);
+      if (validationError) {
+        typeErrors.push(`Column '${col}': expected ${expectedType}, got ${typeof value} (${JSON.stringify(value)})`);
+      }
+    }
+
+    if (typeErrors.length > 0) {
+      errorDetails.issues.push(`Type validation failed: ${typeErrors.join('; ')}`);
+      const error = new Error(`[VALIDATION] ${errorDetails.issues.join('; ')}`);
+      error.errorCode = ErrorCodes.VAL_TYPE_MISMATCH;
+      error.errorCodeName = 'VAL_TYPE_MISMATCH';
+      error.errorType = 'VALIDATION';
+      console.error('❌ [genericTableCreate] Validation failed:', error.message);
+      console.error('   Error Code:', error.errorCode, `(${error.errorCodeName})`);
+      throw error;
+    }
+
+    // Build parameterized INSERT query
+    const columnList = columns.join(', ');
+    const placeholders = columns.map((_, idx) => `$${idx + 1}`).join(', ');
+    const queryParams = columns.map(col => values[col]);
+    
+    const query = `INSERT INTO ${table} (${columnList}) VALUES (${placeholders}) RETURNING *;`;
+
+    console.log(`🔄 [genericTableCreate] Attempting to insert into '${table}' with columns: ${columns.join(', ')}`);
+
+    // Execute the validated query
+    try {
+      const result = await this.db.genericTableCreate(query, queryParams);
+      console.log(`✅ [genericTableCreate] Successfully created row in '${table}' with ID: ${result.id || 'N/A'}`);
+      return result;
+    } catch (dbError) {
+      // Catch database-level errors and provide specific reasons
+      let errorMessage = `[DATABASE] Failed to insert into '${table}': `;
+      let errorCode = ErrorCodes.DB_UNKNOWN_ERROR;
+      let errorCodeName = 'DB_UNKNOWN_ERROR';
+      let errorType = 'DATABASE';
+      
+      if (dbError.code === '23505') { // Unique violation
+        errorMessage += `Duplicate entry - a row with these values already exists. Constraint: ${dbError.constraint || 'unknown'}`;
+        errorCode = ErrorCodes.DB_UNIQUE_VIOLATION;
+        errorCodeName = 'DB_UNIQUE_VIOLATION';
+      } else if (dbError.code === '23502') { // Not null violation
+        errorMessage += `NOT NULL constraint violation - required column is missing or null. Column: ${dbError.column || 'unknown'}`;
+        errorCode = ErrorCodes.DB_NOT_NULL_VIOLATION;
+        errorCodeName = 'DB_NOT_NULL_VIOLATION';
+      } else if (dbError.code === '23503') { // Foreign key violation
+        errorMessage += `Foreign key constraint violation - referenced value does not exist. Constraint: ${dbError.constraint || 'unknown'}`;
+        errorCode = ErrorCodes.DB_FOREIGN_KEY_VIOLATION;
+        errorCodeName = 'DB_FOREIGN_KEY_VIOLATION';
+      } else if (dbError.code === '23514') { // Check constraint violation
+        errorMessage += `Check constraint violation - value does not meet table constraints. Constraint: ${dbError.constraint || 'unknown'}`;
+        errorCode = ErrorCodes.DB_CHECK_VIOLATION;
+        errorCodeName = 'DB_CHECK_VIOLATION';
+      } else if (dbError.code === '22P02') { // Invalid input syntax
+        errorMessage += `Invalid data format - one or more values cannot be converted to the expected type. Details: ${dbError.message}`;
+        errorCode = ErrorCodes.DB_INVALID_INPUT;
+        errorCodeName = 'DB_INVALID_INPUT';
+      } else if (dbError.code === '42703') { // Undefined column
+        errorMessage += `Column does not exist in table. Details: ${dbError.message}`;
+        errorCode = ErrorCodes.DB_UNDEFINED_COLUMN;
+        errorCodeName = 'DB_UNDEFINED_COLUMN';
+      } else {
+        errorMessage += `${dbError.message || 'Unknown database error'}`;
+        errorCode = ErrorCodes.DB_UNKNOWN_ERROR;
+        errorCodeName = 'DB_UNKNOWN_ERROR';
+      }
+      
+      const error = new Error(errorMessage);
+      error.errorCode = errorCode;
+      error.errorCodeName = errorCodeName;
+      error.errorType = errorType;
+      error.dbCode = dbError.code; // Preserve original PostgreSQL error code
+      error.dbDetail = dbError.detail;
+      error.dbHint = dbError.hint;
+      error.dbConstraint = dbError.constraint;
+      error.dbColumn = dbError.column;
+      
+      console.error('❌ [genericTableCreate] Database error:', errorMessage);
+      console.error('   Error Code:', errorCode, `(${errorCodeName})`);
+      console.error('   PostgreSQL Code:', dbError.code || 'N/A');
+      console.error('   Error Detail:', dbError.detail || 'N/A');
+      console.error('   Error Hint:', dbError.hint || 'N/A');
+      console.error('   Constraint:', dbError.constraint || 'N/A');
+      console.error('   Column:', dbError.column || 'N/A');
+      throw error;
+    }
+  }
+
+
+ /**
+   * Move an employee record between role-specific tables.
+   * Uses a transaction to insert into the new table and delete from the old.
+   * @param {number} id - Employee identifier.
+   * @param {0|1} role - 0 for cashier, 1 for manager.
+   * @returns {Promise&lt;object>} Newly inserted record in the destination table.
+   */
+async employeeMove(id, role) {
+  if (!this.schemaInitialized) {
+    throw new Error("ServerLogic not initialized. Call initialize() first.");
+  }
+
+  if (!id || typeof id !== "number") {
+    throw new Error("id must be a valid number");
+  }
+
+  if (role !== 0 &amp;&amp; role !== 1) {
+    throw new Error("role must be 0 or 1");
+  }
+
+  const oldTable = role === 1 ? "cashiers" : "managers";
+  const newTable = role === 1 ? "managers" : "cashiers";
+
+  if (!this.allowedTables[oldTable]) throw new Error(`Old table '${oldTable}' does not exist.`);
+  if (!this.allowedTables[newTable]) throw new Error(`New table '${newTable}' does not exist.`);
+
+  // 1. Fetch the employee record
+  const rows = await this.genericTableGet(oldTable, [], id);
+  if (!rows || rows.length === 0) throw new Error(`Employee with id ${id} not found in '${oldTable}'`);
+
+  const row = rows[0];
+  const savedPassword = row._password;
+
+  // Remove the id for insertion
+  const { id: removedId, ...rowWithoutId } = row;
+  let mappedRow = { ...rowWithoutId };
+
+  // Map managername ↔ cashiername
+  if (oldTable === "managers" &amp;&amp; newTable === "cashiers") {
+    mappedRow.cashiername = mappedRow.managername;
+    delete mappedRow.managername;
+  }
+  if (oldTable === "cashiers" &amp;&amp; newTable === "managers") {
+    mappedRow.managername = mappedRow.cashiername;
+    delete mappedRow.cashiername;
+  }
+
+  // Ensure numeric fields are numbers
+  const numericFields = ["workinghours", "totalhours", "payrate"];
+  numericFields.forEach(f => {
+    if (mappedRow[f] !== undefined) mappedRow[f] = Number(mappedRow[f]);
+  });
+
+  // 2. Insert into new table
+  const inserted = await this.genericTableCreate(newTable, mappedRow);
+  const newId = inserted.id;
+
+  // 3. Restore password
+  await this.genericTableSetPassword(newTable, "_password", savedPassword, newId);
+
+  // 4. Remove from old table
+  await this.genericTableDelete(oldTable, "id", id);
+
+  // 5. Return the inserted row
+  return inserted;
+}
+
+
+
+  /**
+   * Generic table delete with dynamic schema validation - deletes rows matching column=value
+   * @param {string} table - Table name to delete from (REQUIRED)
+   * @param {string} column - Column name to filter by (REQUIRED)
+   * @param {any} value - Value to match for deletion (REQUIRED)
+   * @returns {Promise&lt;number>} Number of rows deleted
+   */
+  async genericTableDelete(table, column, value) {
+    /**
+     * Delete rows from a table where a column equals a value.
+     * Validates table/column existence and type compatibility.
+     * @param {string} table
+     * @param {string} column
+     * @param {any} value
+     * @returns {Promise&lt;number>} Deleted row count
+     */
+    if (!this.schemaInitialized) {
+      const error = "ServerLogic not initialized. Call initialize() first.";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    if (!table || typeof table !== 'string') {
+      const error = "Table parameter is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    if (!this.allowedTables[table]) {
+      const error = `Invalid table: ${table}. Allowed tables: ${Object.keys(this.allowedTables).join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    const allowedColumns = this.allowedTables[table];
+    if (!column || typeof column !== 'string') {
+      const error = "Column parameter is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    if (!allowedColumns.includes(column)) {
+      const error = `Invalid column: ${column} for table ${table}. Allowed columns: ${allowedColumns.join(', ')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    if (value === undefined) {
+      const error = "Value parameter is required";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate type compatibility
+    const expectedType = this.columnTypes[table][column];
+    const validationError = this._validateColumnType(column, value, expectedType);
+    if (validationError) {
+      const error = `Type validation failed for ${table}.${column} on delete:\n${validationError}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    const query = `DELETE FROM ${table} WHERE ${column} = $1;`;
+    const params = [value];
+    return this.db.genericTableDelete(query, params);
+  }
+
+  async genericGetReport(reportType, params = []){
+    /**
+     * Generate a report given a type and optional parameters.
+     * Validates input types and dispatches to the data layer.
+     * @param {string} reportType - Report key (e.g., "X", "Sales").
+     * @param {any[]} params - Optional parameter list for the report.
+     * @returns {Promise&lt;any>} Report data payload.
+     */
+    // Check if schema is initialized
+    if (!this.schemaInitialized) { 
+      const error = "ServerLogic not initialized. Call initialize() first.";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    const typeErrors = [];
+    if (typeof reportType !== "string") {
+      typeErrors.push(`reportType must be a string, got ${typeof reportType}`);
+    }
+
+    if (!Array.isArray(params)) {
+      typeErrors.push(`params must be an array, got ${typeof params}`);
+    }
+
+  // You can enforce optional expected param structure per report type:
+    switch (reportType) {
+      case "X":
+        if (params.length > 0) {
+          typeErrors.push(`X report does not accept parameters, but received ${params.length} parameter(s)`);
+        }
+        break;
+      case "Z":
+        if (params.length > 0) {
+          typeErrors.push(`Z report does not accept parameters, but received ${params.length} parameter(s)`);
+        }
+        break;
+      case "ProductUsage":
+        if (params.length !== 2) {
+          typeErrors.push(`ProductUsage report expects exactly 2 parameters [fromDate, toDate], but received ${params.length} parameter(s)`);
+        } else {
+          // Check each date parameter individually
+          if (params[0] !== null &amp;&amp; params[0] !== undefined &amp;&amp; typeof params[0] !== "string" &amp;&amp; !(params[0] instanceof Date)) {
+            typeErrors.push(`ProductUsage report: fromDate must be a string or Date object, but got ${typeof params[0]} (${JSON.stringify(params[0])})`);
+          }
+          if (params[1] !== null &amp;&amp; params[1] !== undefined &amp;&amp; typeof params[1] !== "string" &amp;&amp; !(params[1] instanceof Date)) {
+            typeErrors.push(`ProductUsage report: toDate must be a string or Date object, but got ${typeof params[1]} (${JSON.stringify(params[1])})`);
+          }
+        }
+        break;
+      case "Sales":
+        if (params.length !== 2) {
+          typeErrors.push(`Sales report expects exactly 2 parameters [fromDate, toDate], but received ${params.length} parameter(s)`);
+        } else {
+          // Check each date parameter individually
+          if (params[0] !== null &amp;&amp; params[0] !== undefined &amp;&amp; typeof params[0] !== "string" &amp;&amp; !(params[0] instanceof Date)) {
+            typeErrors.push(`Sales report: fromDate must be a string or Date object, but got ${typeof params[0]} (${JSON.stringify(params[0])})`);
+          }
+          if (params[1] !== null &amp;&amp; params[1] !== undefined &amp;&amp; typeof params[1] !== "string" &amp;&amp; !(params[1] instanceof Date)) {
+            typeErrors.push(`Sales report: toDate must be a string or Date object, but got ${typeof params[1]} (${JSON.stringify(params[1])})`);
+          }
+        }
+        break;
+      default:
+        typeErrors.push(`Unknown report type: ${reportType}`);
+    }
+
+    if (typeErrors.length > 0) {
+      const error = `Type validation failed for ${reportType} report:\n${typeErrors.join('\n')}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    switch (reportType) {
+      case "X":
+        return await this.db.generateXReport();
+      case "Z":
+        return await this.db.generateZReport();
+      case "ProductUsage":
+        // params is expected to be [from, to]; pass as two separate args to avoid
+        // accidentally forwarding the whole array as a single parameter which
+        // results in PostgreSQL receiving an array literal like "{NULL,NULL}".
+        return await this.db.generateProductUsageReport(params[0] ?? null, params[1] ?? null);
+      case "Sales":
+        return await this.db.generateSalesReport(params[0] ?? null, params[1] ?? null);
+      default:
+        throw new Error(`Unhandled report type: ${reportType}`);
+    }
+
+  }
+
+  /**
+   * Helper method to validate if a value matches the expected PostgreSQL data type
+   * @param {string} columnName - Name of the column
+   * @param {any} value - Value to validate
+   * @param {string} pgType - PostgreSQL data type
+   * @returns {string|null} Error message if invalid, null if valid
+   */
+  _validateColumnType(columnName, value, pgType) {
+    // Allow null values for nullable columns (PostgreSQL will handle NOT NULL constraints)
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    const jsType = typeof value;
+    const lowerType = pgType.toLowerCase();
+
+    // Numeric types
+    if (lowerType.includes('int') || lowerType.includes('serial')) {
+      if (jsType !== 'number' || !Number.isInteger(value)) {
+        return `  - Column '${columnName}': expected integer, got ${jsType} (${JSON.stringify(value)})`;
+      }
+    }
+    // Decimal/numeric types
+    else if (lowerType.includes('numeric') || lowerType.includes('decimal') || 
+             lowerType.includes('real') || lowerType.includes('double') || 
+             lowerType.includes('money')) {
+      if (jsType !== 'number' || isNaN(value)) {
+        return `  - Column '${columnName}': expected number, got ${jsType} (${JSON.stringify(value)})`;
+      }
+    }
+    // Boolean types
+    else if (lowerType === 'boolean' || lowerType === 'bool') {
+      if (jsType !== 'boolean') {
+        return `  - Column '${columnName}': expected boolean, got ${jsType} (${JSON.stringify(value)})`;
+      }
+    }
+    // Text/string types
+    else if (lowerType.includes('char') || lowerType.includes('text') || lowerType === 'name') {
+      if (jsType !== 'string') {
+        return `  - Column '${columnName}': expected string, got ${jsType} (${JSON.stringify(value)})`;
+      }
+    }
+    // Date/time types (accept string or Date object)
+    else if (lowerType.includes('date') || lowerType.includes('time') || lowerType.includes('timestamp')) {
+      if (jsType !== 'string' &amp;&amp; !(value instanceof Date)) {
+        return `  - Column '${columnName}': expected date string or Date object, got ${jsType} (${JSON.stringify(value)})`;
+      }
+      // Validate date string format if it's a string
+      if (jsType === 'string' &amp;&amp; isNaN(Date.parse(value))) {
+        return `  - Column '${columnName}': invalid date format '${value}'`;
+      }
+    }
+    // JSON types
+    else if (lowerType.includes('json')) {
+      // JSON columns accept objects, arrays, or strings
+      if (jsType !== 'object' &amp;&amp; jsType !== 'string') {
+        return `  - Column '${columnName}': expected JSON (object/array/string), got ${jsType}`;
+      }
+    }
+
+    return null; // Valid
+  }
+
+  /**
+   * Get available report IDs and their descriptions
+   * @returns {Object} Map of report IDs to descriptions
+   */
+  getReportList() {
+    return {
+      1: { name: 'Total Sales', description: 'Total revenue from all orders', active:true },
+      2: { name: 'Cashier Weekly Pay', description: 'Weekly pay for active cashiers', active:true },
+      3: { name: 'Average Order Total by Week', description: 'Average order total for each week', active:true },
+      4: { name: 'Average Items Per Order', description: 'Average number of menu items per order', active:true },
+      5: { name: 'Busiest Cashiers', description: 'Cashiers ordered by total orders processed', active:true },
+      6: { name: 'Inventory Items Per Menu Item', description: 'Number of inventory items used by each menu item', active:true },
+      7: { name: 'Inventory Levels', description: 'Stock comparison to target levels', active:true },
+      8: { name: 'Inventory Usage By Month', description: 'Inventory usage grouped by month', active:true },
+      9: { name: 'Payroll Summary', description: 'Payroll information for all employees', active:false },
+      10: { name: 'Payroll Summary - Managers', description: 'Payroll information for managers only', active:true },
+      11: { name: 'Payroll Summary - Cashiers', description: 'Payroll information for cashiers only', active:true },
+      12: { name: 'Sales History By Hour', description: 'Orders and revenue grouped by hour', active:true },
+      13: { name: 'Sales History By Week', description: 'Orders and revenue grouped by week', active:true },
+      14: { name: 'Ten Peak Days', description: 'Top 10 days by revenue', active:true },
+      15: { name: 'Top Ten Menu Items', description: 'Top 10 menu items by quantity sold' },
+      16: { name: 'Total Sales By Payment Type', description: 'Total sales grouped by payment type', active:true },
+      17: { name: 'Active/Inactive Cashiers', description: 'Count of active and inactive cashiers', active:true },
+      18: { name: 'Active/Inactive Managers', description: 'Count of active and inactive managers', active:true },
+      19: { name: 'Active/Inactive Employees', description: 'Count of active and inactive employees (both cashiers and managers)', active:false },
+      20: { name: 'Menu', description: 'All menu items', active:true },
+      21: { name: 'Cashiers', description: 'All cashiers', active:true },
+      22: { name: 'Managers', description: 'All managers', active:true },
+      23: { name: 'Inventory', description: 'All inventory items', active:true },
+      24: { name: 'Orders', description: 'All orders', active:false },
+      25: { name: 'Last Order', description: 'Most recent order', active:true },
+      26: { name: 'Menu Ingredients', description: 'Ingredients used in each menu item', active:false },
+      27: { name: 'Master Orders', description: 'All orders with line items and meal items', active:false },
+      28: { name: 'Incomplete Orders', description: 'Orders that have not been delivered', active:false },
+      29: { name: 'Today\'s Orders', description: 'All orders placed today', active:true },
+      30: { name: 'Product Usage Report', description: 'Report showing quantity used per item given date range', active:true},
+      31: { name: 'Sales Report', description: 'Report showing total revenue generated per item', active:true},
+      32: { name: 'X Report', description: 'X report showing sales generated and number of order per hour', active:true},
+      33: { name: 'Z Report', description: 'Z report showing sales and number of orders since last Z Report', active:true}
+    };
+  }
+
+  /**
+   * Get report data by report ID
+   * @param {number} reportId - Report ID to retrieve (REQUIRED)
+   * @param {Object} params - Optional parameters for the report
+   * @param {string|Date|null} params.from - Optional start date for date-filtered reports
+   * @param {string|Date|null} params.to - Optional end date for date-filtered reports
+   * @returns {Promise&lt;Object>} Report data
+   */
+  async getReport(reportId, params = {}) {
+    if (typeof reportId !== 'number') {
+      const error = `Report ID must be a number, but got ${typeof reportId}`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    const reports = this.getReportList();
+    if (!reports[reportId]) {
+      const error = `Invalid report ID: ${reportId}. Use getReportList to see available reports.`;
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Extract optional date parameters
+    const { from = null, to = null } = params;
+
+    // Execute the appropriate database query based on report ID
+    let data;
+    try {
+    switch (reportId) {
+      case 1: // Total Sales
+        data = await this.db.totalSales(from, to);
+        break;
+      case 2: // Cashier Weekly Pay
+        data = await this.db.cashierWeeklyPay(from, to);
+        break;
+      case 3: // Average Order Total by Week
+        data = await this.db.avgOrderTotalByWeek(from, to);
+        break;
+      case 4: // Average Items Per Order
+        data = await this.db.avgItemsPerOrder(from, to);
+        break;
+      case 5: // Busiest Cashiers
+        data = await this.db.busiestCashiers(from, to);
+        break;
+      case 6: // Inventory Items Per Menu Item
+        data = await this.db.numInventoryItemsPerMenuItem();
+        break;
+      case 7: // Inventory Levels
+        data = await this.db.inventoryLevels();
+        break;
+      case 8: // Inventory Usage By Month
+        data = await this.db.inventoryUsageByMonth(from, to);
+        break;
+      case 9: // Payroll Summary (All)
+        data = await this.db.payrollSummary(from, to);
+        break;
+      case 10: // Payroll Summary - Managers
+        data = await this.db.payrollSummaryManagers(from, to);
+        break;
+      case 11: // Payroll Summary - Cashiers
+        data = await this.db.payrollSummaryCashiers(from, to);
+        break;
+      case 12: // Sales History By Hour
+        data = await this.db.salesHistoryByHour(from, to);
+        break;
+      case 13: // Sales History By Week
+        data = await this.db.salesHistoryByWeek(from, to);
+        break;
+      case 14: // Ten Peak Days
+        data = await this.db.tenPeakDays(from, to);
+        break;
+      case 15: // Top Ten Menu Items
+        data = await this.db.topTenMenuItems(from, to);
+        break;
+      case 16: // Total Sales By Payment Type
+        data = await this.db.totalSalesByPaymentType(from, to);
+        break;
+      case 17: // Active/Inactive Cashiers
+        data = await this.db.activeInactiveCashiers();
+        break;
+      case 18: // Active/Inactive Managers
+        data = await this.db.activeInactiveManagers();
+        break;
+      case 19: // Active/Inactive Employees
+        data = await this.db.activeInactiveEmployees();
+        break;
+      case 20: // Menu
+        data = await this.genericTableGet('menu', [], null);
+        break;
+      case 21: // Cashiers
+        data = await this.genericTableGet('cashiers', [], null);
+        break;
+      case 22: // Managers
+        data = await this.genericTableGet('managers', [], null);
+        break;
+      case 23: // Inventory
+        data = await this.genericTableGet('inventory', [], null);
+        break;
+      case 24: // Orders
+        data = await this.genericTableGet('orders', [], null);
+        break;
+      case 25: // Last Order
+        data = await this.db.getLastOrder();
+        break;
+      case 26: // Menu Ingredients
+        data = await this.db.getMenuIngredientsAll();
+        break;
+      case 27: // Master Orders
+        data = await this.db.getOrdersMaster(from, to);
+        break;
+      case 28: // Incomplete Orders
+        data = await this.db.getIncompleteOrders();
+        break;
+      case 29: // Today's Orders
+        data = await this.db.getTodaysOrders(from, to);
+        break;
+      case 30: // Product Usage Report
+        data = await this.genericGetReport("ProductUsage", [from, to]);
+        break;
+      case 31: // Sales Report
+        data = await this.genericGetReport("Sales", [from, to]);
+        break;
+      case 32: // X Report
+        data = await this.genericGetReport("X");
+        break;
+      case 33: // Z Report
+        data = await this.genericGetReport("Z");
+        break;
+      default:
+        const error = `Report ID ${reportId} is not implemented yet`;
+        console.error('❌ ServerLogic Error:', error);
+        throw new Error(error);
+    }
+    } catch (error) {
+      // Wrap error with report ID for better debugging
+      const reportName = reports[reportId]?.name || `Report ${reportId}`;
+      if (error.message &amp;&amp; !error.message.includes(`Report ID ${reportId}`) &amp;&amp; !error.message.includes(`Report ${reportId}`) &amp;&amp; !error.message.includes(`Error in ${reportName}`)) {
+        const enhancedError = new Error(`Error in ${reportName} (Report ID ${reportId}): ${error.message}`);
+        enhancedError.originalError = error;
+        throw enhancedError;
+      }
+      throw error;
+    }
+
+    // Build response object
+    const response = {
+      reportId,
+      reportName: reports[reportId].name,
+      description: reports[reportId].description,
+      data
+    };
+
+    // Only include dateRange for reports that use date parameters
+    const reportsWithoutDateParams = [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 32, 33]; // Active/Inactive reports, table dumps, X/Z reports
+    if (!reportsWithoutDateParams.includes(reportId)) {
+      response.dateRange = {
+        from: from || null,
+        to: to || null
+      };
+    }
+
+    return response;
+  }
+
+  /**
+   * Validate employee login credentials
+   * @param {string} username - Username to validate (REQUIRED)
+   * @param {string} password - Password to validate (REQUIRED)
+   * @param {number} role - Role indicator: 0 = cashier, 1 = manager (REQUIRED)
+   * @returns {Promise&lt;Object>} Validation result with employee info if successful
+   */
+  async validateEmployeeLogin(username, password, role) {
+    // Validate inputs
+    if (!username || typeof username !== 'string') {
+      const error = "Username is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    if (!password || typeof password !== 'string') {
+      const error = "Password is required and must be a string";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    if (role !== 0 &amp;&amp; role !== 1) {
+      const error = "Role must be 0 (cashier) or 1 (manager)";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Determine which table to query
+    const table = role === 0 ? 'cashiers' : 'managers';
+    const nameColumn = role === 0 ? 'cashierName' : 'managerName';
+
+    // Query the database for the user
+    const query = `SELECT * FROM ${table} WHERE username = $1;`;
+    const result = await this.db.genericTableGet(query, [username]);
+
+    // Check if user exists
+    if (!result || result.length === 0) {
+      return {
+        success: false,
+        message: 'Invalid username or password'
+      };
+    }
+
+    const employee = result[0];
+
+    // 🔥 VERIFY HASHED PASSWORD HERE
+    let validPassword = false;
+    try {
+      validPassword = await argon2.verify(employee._password, password);
+    } catch (err) {
+      console.error("❌ Argon2 verify failed:", err);
+      return {
+        success: false,
+        message: "Invalid username or password"
+      };
+    }
+
+    if (!validPassword) {
+      return {
+        success: false,
+        message: 'Invalid username or password'
+      };
+    }
+
+    // Check if employee is active
+    if (!employee.isactive) {
+      return {
+        success: false,
+        message: 'Account is inactive. Please contact your manager.'
+      };
+    }
+
+    // Return success with employee info (excluding password)
+    const { _password, ...employeeInfo } = employee;
+    return {
+      success: true,
+      message: 'Login successful',
+      employee: {
+        id: employeeInfo.id,
+        name: employeeInfo[nameColumn.toLowerCase()],
+        username: employeeInfo.username,
+        role: role === 0 ? 'cashier' : 'manager',
+        isActive: employeeInfo.isactive
+      }
+    };
+  }
+
+  /**
+   * Create an order. JSON contains [name, lineItems[], paymentType, total, cashierID].
+   * Each lineItem contains [menuID, quantity, mealItems[], price].
+   * Each entree contains [menuID, quantity].
+   * @param {Object} order - Includes name, lineItems[], paymentType, delivered?, cashierID?, email?, wantsReceiptEmail?
+   * @returns {Promise&lt;Object>}
+   * @author Danny
+   */
+async createOrder(order) {
+    if (!order || typeof order !== 'object') {
+      const error = "Order object required";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    if (!Array.isArray(order.lineItems)) {
+      const error = "Order must have a lineItems array";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+    // Validate email if provided - must be text (string) or empty
+    if (order.email !== undefined &amp;&amp; order.email !== null &amp;&amp; order.email !== '') {
+      if (typeof order.email !== 'string') {
+        const error = "Email must be text (string) or empty";
+        console.error('❌ ServerLogic Error:', error);
+        throw new Error(error);
+      }
+    }
+    // Server-side price computation + full transaction orchestration
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Handle customer lookup/creation if email is provided
+      let customerID = null;
+      if (order.email &amp;&amp; typeof order.email === 'string' &amp;&amp; order.email.trim() !== '') {
+        const email = order.email.trim();
+        // Try to find existing customer by email
+        let customer = await this.db.findCustomerByEmail(client, email);
+
+        if (!customer) {
+          // Customer doesn't exist, create a new one (name not required)
+          console.log(`📧 Creating new customer for email: ${email}`);
+          customer = await this.db.createCustomer(client, email);
+        } else {
+          console.log(`📧 Found existing customer for email: ${email} (ID: ${customer.id})`);
+        }
+
+        customerID = customer.id;
+      }
+
+      // Compute totals by reading menu prices
+      // Helper to get price for a menu id
+      const getPrice = async (menuId) => {
+        const r = await client.query('SELECT price FROM menu WHERE id = $1', [menuId]);
+        return r.rows[0] ? Number(r.rows[0].price) : 0;
+      };
+
+      let orderTotal = 0;
+
+      // Calculate line totals
+      const lineTotals = [];
+      for (const li of order.lineItems) {
+        const basePrice = await getPrice(li.menuID);
+        let linePrice = basePrice * (li.quantity || 1);
+
+        if (Array.isArray(li.entree)) {
+          for (const ent of li.entree) {
+            const p = await getPrice(ent.menuID);
+            linePrice += p * (ent.quantity || 1);
+          }
+        }
+
+        lineTotals.push(linePrice);
+        orderTotal += linePrice;
+      }
+
+      // Create order row (use computed orderTotal)
+      // Default delivered to false when not provided by client
+      const deliveredFlag = order.delivered === undefined ? false : Boolean(order.delivered);
+      // Map frontend receipt preference into DB column (accept camelCase and snake/lowercase variants)
+      const orderRow = await this.db.createOrder(client, {
+        timeOfOrder: new Date(),
+        name: order.name || '',
+        paymentType: order.paymentType || 'Card',
+        price: orderTotal,
+        delivered: deliveredFlag,
+        cashierID: order.cashierID || null,
+        customerID: customerID
+      });
+      const orderID = orderRow.id;
+
+      // Insert lineItems and mealItems, and deduct inventory
+      for (let i = 0; i &lt; order.lineItems.length; i++) {
+        const li = order.lineItems[i];
+        const lineQuantity = li.quantity || 1;
+        const lineRow = await this.db.createLineItem(client, {
+          orderID,
+          itemType: li.menuID,
+          quantity: lineQuantity,
+          price: lineTotals[i]
+        });
+        const lineItemID = lineRow.itemid || lineRow.itemid || lineRow.id || lineRow.itemID;
+
+        // Deduct inventory for the main menu item (e.g., Bowl, Plate, etc.)
+        const menuIngredients = await this.db.getMenuIngredients(client, li.menuID);
+        for (const ingredient of menuIngredients) {
+          const quantityToDeduct = ingredient.quantity * lineQuantity;
+          await this.db.updateInventoryStock(client, ingredient.inventory_id, quantityToDeduct);
+        }
+
+        // Handle entree items if they exist
+        if (Array.isArray(li.entree)) {
+          for (const ent of li.entree) {
+            const entreeQuantity = ent.quantity || 1;
+            await this.db.createMealItem(client, {
+              lineItemID,
+              menuID: ent.menuID,
+              quantity: entreeQuantity
+            });
+
+            // Deduct inventory for the entree menu item
+            const entreeIngredients = await this.db.getMenuIngredients(client, ent.menuID);
+            for (const ingredient of entreeIngredients) {
+              const quantityToDeduct = ingredient.quantity * entreeQuantity;
+              await this.db.updateInventoryStock(client, ingredient.inventory_id, quantityToDeduct);
+            }
+          }
+        }
+      }
+
+      // Add points to customer if email was provided
+      // If no email was given, customerID will be null and this block is skipped (no points added)
+      let pointsAwarded = 0;
+      let customerPointsTotal = null;
+      if (customerID) {
+        // Points = order total rounded up (e.g., $12.50 → 13 points)
+        const pointsToAdd = Math.ceil(orderTotal);
+        const updatedCustomer = await this.db.addCustomerPoints(client, customerID, pointsToAdd);
+        pointsAwarded = pointsToAdd;
+        customerPointsTotal = typeof updatedCustomer?.points === 'number' ? updatedCustomer.points : null;
+        console.log(`🎁 Added ${pointsToAdd} points to customer ID ${customerID} (order total: $${orderTotal.toFixed(2)})`);
+      }
+
+      await client.query('COMMIT'); // if doesnt error, commit changes to db
+
+      // If customer requested an emailed receipt, attempt to send it now.
+      let emailAttempted = false;
+      let emailSent = false;
+      let emailPending = false;
+      try {
+        const wantsReceiptFlag = order.wantsReceiptEmail !== undefined
+          ? Boolean(order.wantsReceiptEmail)
+          : (order.wantsemailreceipt !== undefined ? Boolean(order.wantsemailreceipt) : false);
+
+        // Email environment check suppressed
+
+        if (wantsReceiptFlag &amp;&amp; order.email) {
+          // Lazy-import email sender to avoid startup dependency issues
+          const { sendOrderReceipt } = await import('./emailSender.js');
+          // Fire-and-forget: do not block the HTTP response on SMTP
+          emailAttempted = true;
+          emailPending = true;
+          // Async receipt email queued
+          Promise.resolve()
+            .then(() => sendOrderReceipt({ orderID, orderObj: order, orderTotal, toEmail: order.email }))
+            .then((ok) => {
+              // Async email result suppressed
+            })
+            .catch((e) => {
+              // Async email errors suppressed
+            });
+        }
+      } catch (emailErr) {
+        // Suppress wrapper send errors
+      }
+
+      return { success: true, orderID, price: orderTotal, delivered: orderRow.delivered, pointsAwarded, customerPointsTotal, customerID, emailAttempted, emailSent, emailPending };
+    } catch (err) {
+      await client.query('ROLLBACK'); // on error, rollback all changes
+      console.error('❌ ServerLogic Error (createOrder):', err.message || err);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Gets incomplete order using the given ID
+   * @param {Number} id - orderID to run query on
+   * @returns {Promise&lt;Object>} Validation result with employee info if successful
+   */
+  async getIncompleteOrderById(orderId){
+    if (!this.schemaInitialized) {
+      const error = "ServerLogic not initialized. Call initialize() first.";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    // Validate orderId is provided
+    if (orderId === null || orderId === undefined || orderId === '') {
+      console.log("orderId", orderId);
+      const error = "orderId parameter is required";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    if (typeof orderId !== 'number' || isNaN(orderId)) {
+      const error = "Id parameter must be a valid number";
+      console.error('❌ ServerLogic Error:', error);
+      throw new Error(error);
+    }
+
+    return await this.db.getIncompleteOrderById(orderId);
+  }
+
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

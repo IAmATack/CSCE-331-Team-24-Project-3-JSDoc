@@ -1,0 +1,1659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: customer-side/kiosk.jsx</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: customer-side/kiosk.jsx</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import React, { useEffect, useState } from "react";
+import { GoogleOAuthProvider, GoogleLogin } from "@react-oauth/google";
+import client from "../employee-side/clientConnection.js";
+import "./kiosk.css";
+import Weather from "../components/Weather/Weather.js";
+import Translate from "../components/Translate.js";
+
+const MEAL_TYPES = {
+  ALC_ENTREE: "ALC_ENTREE",
+  ALC_SIDE: "ALC_SIDE",
+  BOWL: "BOWL",
+  PLATE: "PLATE",
+  BIGGER_PLATE: "BIGGER_PLATE",
+  UNKNOWN: "UNKNOWN",
+};
+
+const MEAL_RULES = {
+  [MEAL_TYPES.ALC_ENTREE]: {
+    kind: MEAL_TYPES.ALC_ENTREE,
+    allowSides: false,
+    allowEntrees: true,
+    maxSides: 0,
+    maxEntrees: 1,
+    requireSides: false,
+    requireEntrees: true,
+    entreeQtyBySize: {
+      small: 1,
+      medium: 2,
+      large: 3,
+      default: 1,
+    },
+  },
+
+  [MEAL_TYPES.ALC_SIDE]: {
+    kind: MEAL_TYPES.ALC_SIDE,
+    allowSides: true,
+    allowEntrees: false,
+    maxSides: 1,
+    maxEntrees: 0,
+    requireSides: true,
+    requireEntrees: false,
+    sideQtyBySize: {
+      medium: 1,
+      large: 2,
+      default: 1,
+    },
+  },
+
+  [MEAL_TYPES.BOWL]: {
+    kind: MEAL_TYPES.BOWL,
+    allowSides: true,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 1,
+    requireSides: true,
+    requireEntrees: true,
+  },
+
+  [MEAL_TYPES.PLATE]: {
+    kind: MEAL_TYPES.PLATE,
+    allowSides: true,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 2,
+    requireSides: true,
+    requireEntrees: true,
+  },
+
+  [MEAL_TYPES.BIGGER_PLATE]: {
+    kind: MEAL_TYPES.BIGGER_PLATE,
+    allowSides: true,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 3,
+    requireSides: true,
+    requireEntrees: true,
+  },
+
+  [MEAL_TYPES.UNKNOWN]: {
+    kind: MEAL_TYPES.UNKNOWN,
+    allowEntrees: true,
+    maxSides: 2,
+    maxEntrees: 2,
+    requireSides: false,
+    requireEntrees: false,
+  },
+};
+
+function getRulesForSize(sizeItem) {
+  if (!sizeItem) return MEAL_RULES[MEAL_TYPES.UNKNOWN];
+
+  const raw = (sizeItem.itemname || "").toLowerCase();
+
+  if (raw.includes("entree") &amp;&amp; raw.includes("carte")) {
+    return MEAL_RULES[MEAL_TYPES.ALC_ENTREE];
+  }
+
+  if (raw.includes("side") &amp;&amp; raw.includes("carte")) {
+    return MEAL_RULES[MEAL_TYPES.ALC_SIDE];
+  }
+
+  if (raw.includes("bowl")) return MEAL_RULES[MEAL_TYPES.BOWL];
+  if (raw.includes("plate") &amp;&amp; !raw.includes("bigger"))
+    return MEAL_RULES[MEAL_TYPES.PLATE];
+  if (raw.includes("bigger")) return MEAL_RULES[MEAL_TYPES.BIGGER_PLATE];
+
+  return MEAL_RULES[MEAL_TYPES.UNKNOWN];
+}
+
+function getSizeLabelFromName(itemname = "") {
+  const raw = itemname.toLowerCase();
+
+  if (raw.startsWith("s_")) return "small";
+  if (raw.startsWith("m_")) return "medium";
+  if (raw.startsWith("l_")) return "large";
+
+  return "default";
+}
+
+function validateMeal(rules, sides, entrees) {
+  const type = rules.kind;
+
+  if (type === MEAL_TYPES.ALC_ENTREE) {
+    if (entrees.length === 0)
+      return { ok: false, message: "Please choose an entrée." };
+    if (sides.length > 0)
+      return { ok: false, message: "A La Carte Entrées cannot include sides." };
+  }
+
+  if (type === MEAL_TYPES.ALC_SIDE) {
+    if (sides.length === 0)
+      return { ok: false, message: "Please choose a side." };
+    if (entrees.length > 0)
+      return { ok: false, message: "A La Carte Sides cannot include entrées." };
+  }
+
+  if (rules.requireSides &amp;&amp; sides.length === 0)
+    return { ok: false, message: "Please add at least one side." };
+
+  if (rules.requireEntrees &amp;&amp; entrees.length === 0)
+    return { ok: false, message: "Please add at least one entrée." };
+
+  if (sides.length > rules.maxSides)
+    return {
+      ok: false,
+      message: `This meal allows up to ${rules.maxSides} side(s).`,
+    };
+
+  if (entrees.length > rules.maxEntrees)
+    return {
+      ok: false,
+      message: `This meal allows up to ${rules.maxEntrees} entrée(s).`,
+    };
+
+  return { ok: true };
+}
+
+function buildMealItems(rules, size, sides, entrees) {
+  const type = rules.kind;
+
+  if (type === MEAL_TYPES.ALC_ENTREE) {
+    const label = getSizeLabelFromName(size.itemname);
+    const qty = rules.entreeQtyBySize?.[label] ?? rules.entreeQtyBySize.default;
+    return entrees.map((e) => ({ menuID: e.id, quantity: qty }));
+  }
+
+  if (type === MEAL_TYPES.ALC_SIDE) {
+    const label = getSizeLabelFromName(size.itemname);
+    const qty = rules.sideQtyBySize?.[label] ?? rules.sideQtyBySize.default;
+    return sides.map((s) => ({ menuID: s.id, quantity: qty }));
+  }
+
+  const sideMealItems =
+    sides.length === 1
+      ? [{ menuID: sides[0].id, quantity: 1 }]
+      : sides.map((s) => ({ menuID: s.id, quantity: 0.5 }));
+
+  const entreeMealItems = entrees.map((e) => ({ menuID: e.id, quantity: 1 }));
+
+  return [...sideMealItems, ...entreeMealItems];
+}
+
+/**
+ * Enumeration for Kiosk navigation flow states.
+ * @constant {Object}
+ */
+const FLOW = {
+  HOME: "HOME",
+  MEAL: "MEAL",
+  ALC: "ALC",
+  APP: "APP",
+  DRINK: "DRINK",
+};
+
+/**
+ * Timeout duration in milliseconds before resetting the kiosk session.
+ * Currently set to 2 minutes.
+ * @constant {number}
+ */
+const INACTIVITY_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+
+/**
+ * Formats internal item names into user-friendly display strings for the UI.
+ * @param {string} name - Raw database item name.
+ * @returns {string} Formatted display name.
+ */
+function formatSizeDisplayName(name) {
+  switch (name) {
+    case "Bowl":
+      return "Bowl";
+    case "Plate":
+      return "Plate";
+    case "Bigger Plate":
+      return "Bigger Plate";
+    case "S_entreeCarte":
+      return "Small Entrée (A La Carte)";
+    case "M_entreeCarte":
+      return "Medium Entrée (A La Carte)";
+    case "L_entreeCarte":
+      return "Large Entrée (A La Carte)";
+    case "M_sideCarte":
+      return "Medium Side (A La Carte)";
+    case "L_sideCarte":
+      return "Large Side (A La Carte)";
+    default:
+      return name;
+  }
+}
+
+/**
+ * Formats appetizer names (replaces underscores with spaces).
+ * @param {string} name - Raw item name.
+ * @returns {string} Formatted name.
+ */
+function formatAppDisplayName(name) {
+  return name.replace(/_/g, " ");
+}
+
+/**
+ * Formats drink names (converts prefixes S_, M_, L_ to full words).
+ * @param {string} name - Raw item name.
+ * @returns {string} Formatted name.
+ */
+function formatDrinkDisplayName(name) {
+  if (name.startsWith("S_")) return "Small Soda";
+  if (name.startsWith("M_")) return "Medium Soda";
+  if (name.startsWith("L_")) return "Large Soda";
+  return name;
+}
+
+/**
+ * Sub-component for rendering menu item images in the main grid.
+ * @param {Object} props
+ * @param {string} props.src - Image source URL.
+ */
+function PillImage({ src }) {
+  return &lt;img src={src} className="kiosk-pill-image" alt="" />;
+}
+
+/**
+ * Sub-component for rendering option images in the selection flow.
+ * @param {Object} props
+ * @param {string} props.src - Image source URL.
+ */
+function ChoiceImage({ src }) {
+  return &lt;img src={src} className="kiosk-choice-image" alt="" />;
+}
+
+/**
+ * Customer Self-Service Kiosk Component.
+ * * Responsibilities:
+ * - Provide a touch-friendly interface for customers to build orders.
+ * - Manage multi-step navigation flows (Home -> Size -> Sides -> Entrees).
+ * - Enforce inventory availability with "Smart Buffer" logic.
+ * - Handle customer checkout via Google OAuth or email entry.
+ * - Auto-reset session after inactivity.
+ * * @component
+ */
+export default function KioskPOS() {
+  const [menu, setMenu] = useState({
+    size: [],
+    sides: [],
+    entrees: [],
+    drinks: [],
+    appetizers: [],
+  });
+
+  const [inventoryMap, setInventoryMap] = useState({});
+  const [recipeMap, setRecipeMap] = useState({});
+
+  const [orderItems, setOrderItems] = useState([]);
+  const [flow, setFlow] = useState(FLOW.HOME);
+  const [step, setStep] = useState(1);
+
+  const [builder, setBuilder] = useState({
+    size: null,
+    sides: [],
+    entrees: [],
+  });
+
+  const [selectedApp, setSelectedApp] = useState(null);
+  const [selectedDrink, setSelectedDrink] = useState(null);
+  const [sessionMessage, setSessionMessage] = useState("");
+  const [editingIndex, setEditingIndex] = useState(null);
+
+  /**
+   * Effect: Fetches initial menu data from the backend.
+   * Categorizes items into sizes, sides, entrees, drinks, and appetizers.
+   */
+  useEffect(() => {
+    async function fetchMenu() {
+      try {
+        const report = await client.getReport(20);
+        const allItems = report.data || report || [];
+        const active = allItems.filter((item) => item.isactive);
+
+        setMenu({
+          size: active.filter((i) => i.mealtype === "M"),
+          sides: active.filter((i) => i.mealtype === "S"),
+          entrees: active.filter((i) => i.mealtype === "E"),
+          drinks: active.filter((i) => i.mealtype === "D"),
+          appetizers: active.filter((i) => i.mealtype === "A"),
+        });
+      } catch (err) {
+        console.error("Error loading menu:", err);
+      }
+    }
+
+    fetchMenu();
+  }, []);
+
+  /**
+   * Effect: Polls backend for inventory and recipe data every 5 seconds.
+   * Updates local state to enable real-time out-of-stock checking.
+   */
+  useEffect(() => {
+    async function fetchStockData() {
+      try {
+        // Inventory (Report 23)
+        const invReport = await client.getReport(23);
+        const inventoryData = invReport.data || [];
+        const invMap = {};
+        inventoryData.forEach(item => {
+            invMap[item.itemname] = Number(item.stock);
+        });
+        setInventoryMap(invMap);
+
+        // Menu Ingredients (Report 26)
+        const recipeReport = await client.getReport(26);
+        const recipeData = recipeReport.data || [];
+        const rMap = {};
+        recipeData.forEach(row => {
+            rMap[row.menu_item] = row.ingredients;
+        });
+        setRecipeMap(rMap);
+      } catch (err) {
+        console.error("Error updating stock:", err);
+      }
+    }
+
+    fetchStockData();
+    const intervalId = setInterval(fetchStockData, 5000);
+    return () => clearInterval(intervalId);
+  }, []);
+
+  /**
+   * Checks if a specific menu item is out of stock based on current inventory.
+   * Applies "Smart Buffer" logic:
+   * - Ingredients requiring > 1 unit (bulk) use a strict 1x threshold.
+   * - Ingredients requiring &lt;= 1 unit use a 5x safety buffer.
+   * * @param {Object} menuItem - The menu item object to check.
+   * @returns {boolean} True if the item should be disabled/grayed out.
+   */
+  const isOutOfStock = (menuItem) => {
+    if (!menuItem) return false;
+
+    const ingredients = recipeMap[menuItem.itemname];
+
+    if (!ingredients || ingredients.length === 0) return false;
+
+    for (const ing of ingredients) {
+      const currentStock = inventoryMap[ing.ingredient];
+      const singleServingReq = Number(ing.quantity);
+      const bufferMultiplier = singleServingReq > 1 ? 1 : 5;
+      const minimumThreshold = singleServingReq * bufferMultiplier;
+
+      if (currentStock === undefined || currentStock &lt; minimumThreshold) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /**
+   * Effect: Monitors user activity.
+   * Resets the entire flow and clears order if inactive for INACTIVITY_TIMEOUT_MS.
+   */
+  useEffect(() => {
+    const hasActiveSession =
+      orderItems.length > 0 ||
+      flow !== FLOW.HOME ||
+      builder.size ||
+      selectedApp ||
+      selectedDrink;
+
+    if (!hasActiveSession) return;
+
+    const timer = setTimeout(() => {
+      setOrderItems([]);
+      resetFlow();
+      setSessionMessage("Session timed out. Starting a new order.");
+    }, INACTIVITY_TIMEOUT_MS);
+
+    return () => clearTimeout(timer);
+  }, [orderItems, flow, builder, selectedApp, selectedDrink]);
+
+  useEffect(() => {
+    if (!sessionMessage) return;
+
+    const timer = setTimeout(() => {
+      setSessionMessage("");
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [sessionMessage]);
+
+  const subtotal = orderItems.reduce(
+    (sum, it) => sum + Number(it.price || 0),
+    0
+  );
+
+  const baseSizes = menu.size.filter((s) => {
+    const name = s.itemname.toLowerCase();
+    return name === "bowl" || name === "plate" || name === "bigger plate";
+  });
+  const aLaCarteSizes = menu.size.filter((s) =>
+    s.itemname.toLowerCase().includes("carte")
+  );
+
+  /**
+   * Loads an item from the order list into the appropriate builder flow for editing.
+   * Handles both standard meals and A La Carte items correctly.
+   * @param {number} idx - Index of the item to edit.
+   */
+  const editItem = (idx) => {
+    const item = orderItems[idx];
+    if (!item) return;
+
+    setEditingIndex(idx);
+
+    const alcSizeItem = menu.size.find(
+      (x) => x.id === item.menuID &amp;&amp; x.itemname.toLowerCase().includes("carte")
+    );
+    if (alcSizeItem) {
+      const rules = getRulesForSize(alcSizeItem);
+
+      const sides = [];
+      const entrees = [];
+
+      (item.mealItems || []).forEach((mi) => {
+        const menuItem =
+          menu.sides.find((s) => s.id === mi.menuID) ||
+          menu.entrees.find((e) => e.id === mi.menuID);
+
+        if (!menuItem) return;
+
+        if (rules.kind === MEAL_TYPES.ALC_ENTREE) entrees.push(menuItem);
+        if (rules.kind === MEAL_TYPES.ALC_SIDE) sides.push(menuItem);
+      });
+
+      setBuilder({
+        size: alcSizeItem,
+        sides,
+        entrees,
+      });
+
+      setFlow(FLOW.ALC);
+      setStep(1);
+      return;
+    }
+
+    const sizeItem = menu.size.find(
+      (x) => x.id === item.menuID &amp;&amp; !x.itemname.toLowerCase().includes("carte") // exclude ALC
+    );
+    if (sizeItem) {
+      const sides = [];
+      const entrees = [];
+
+      (item.mealItems || []).forEach((mi) => {
+        const menuItem =
+          menu.sides.find((s) => s.id === mi.menuID) ||
+          menu.entrees.find((e) => e.id === mi.menuID);
+        if (!menuItem) return;
+
+        if (menuItem.mealtype === "S") sides.push(menuItem);
+        if (menuItem.mealtype === "E") entrees.push(menuItem);
+      });
+
+      setBuilder({
+        size: sizeItem,
+        sides,
+        entrees,
+      });
+
+      setFlow(FLOW.MEAL);
+      setStep(1);
+      return;
+    }
+  };
+
+  /**
+   * Initiates the standard meal flow (Bowl/Plate) with a selected size.
+   * @param {Object} sizeItem - The container size selected.
+   */
+  const startMealFlow = (sizeItem) => {
+    if (isOutOfStock(sizeItem)) return; 
+    setBuilder({
+      size: sizeItem,
+      sides: [],
+      entrees: [],
+    });
+    setFlow(FLOW.MEAL);
+    setStep(1);
+  };
+
+  /**
+   * Initiates the A La Carte flow.
+   * @param {Object} sizeItem - The A La Carte size item (Small Entree, Medium Side, etc.).
+   */
+  const startALaCarteFlow = (sizeItem) => {
+    if (isOutOfStock(sizeItem)) return;
+    setBuilder({
+      size: sizeItem,
+      sides: [],
+      entrees: [],
+    });
+    setFlow(FLOW.ALC);
+    setStep(1);
+  };
+
+  /**
+   * Initiates the Appetizer selection flow.
+   * @param {Object} appItem - The selected appetizer.
+   */
+  const startAppFlow = (appItem) => {
+    if (isOutOfStock(appItem)) return;
+    setSelectedApp(appItem);
+    setFlow(FLOW.APP);
+  };
+
+  /**
+   * Initiates the Drink selection flow.
+   * @param {Object} drinkItem - The selected drink.
+   */
+  const startDrinkFlow = (drinkItem) => {
+    if (isOutOfStock(drinkItem)) return;
+    setSelectedDrink(drinkItem);
+    setFlow(FLOW.DRINK);
+  };
+
+  /**
+   * Resets the Kiosk to the Home screen and clears all builder state.
+   * Also clears customer checkout inputs.
+   */
+  const resetFlow = () => {
+    setFlow(FLOW.HOME);
+    setStep(1);
+    setBuilder({ size: null, sides: [], entrees: [] });
+    setSelectedApp(null);
+    setSelectedDrink(null);
+    setEditingIndex(null);
+    setShowCheckout(false);
+    setCustomerName("");
+    setCustomerEmail("");
+    setSendReceipt(false);
+  };
+
+  /**
+   * Toggles a side selection in the meal builder.
+   * Enforces maximum side limits defined in MEAL_RULES.
+   * @param {Object} item - The side item to toggle.
+   */
+  const toggleSide = (item) => {
+    if (isOutOfStock(item)) return; 
+    setBuilder((prev) => {
+      const rules = getRulesForSize(prev.size);
+      if (!rules.allowSides) return prev;
+
+      const exists = prev.sides.some((s) => s.id === item.id);
+      if (exists) {
+        return {
+          ...prev,
+          sides: prev.sides.filter((s) => s.id !== item.id),
+        };
+      }
+
+      if (prev.sides.length >= rules.maxSides) {
+        alert(`You can select up to ${rules.maxSides} sides.`);
+        return prev;
+      }
+
+      return { ...prev, sides: [...prev.sides, item] };
+    });
+  };
+
+  /**
+   * Toggles an entree selection in the meal builder.
+   * Enforces maximum entree limits defined in MEAL_RULES.
+   * @param {Object} item - The entree item to toggle.
+   */
+  const toggleEntree = (item) => {
+    if (isOutOfStock(item)) return;
+    setBuilder((prev) => {
+      const rules = getRulesForSize(prev.size);
+      if (!rules.allowEntrees) return prev;
+
+      const exists = prev.entrees.some((e) => e.id === item.id);
+      if (exists) {
+        return {
+          ...prev,
+          entrees: prev.entrees.filter((e) => e.id !== item.id),
+        };
+      }
+
+      if (prev.entrees.length >= rules.maxEntrees) {
+        alert(`You can select up to ${rules.maxEntrees} entrées.`);
+        return prev;
+      }
+
+      return { ...prev, entrees: [...prev.entrees, item] };
+    });
+  };
+
+  /**
+   * Validates the constructed meal and adds it to the cart.
+   * Calculates premium upcharges and formats the display name.
+   */
+  const addBuiltMealToOrder = () => {
+    const { size, sides, entrees } = builder;
+    if (!size) return;
+
+    const rules = getRulesForSize(size);
+    const validation = validateMeal(rules, sides, entrees);
+    if (!validation.ok) {
+      alert(validation.message);
+      return;
+    }
+
+    const mealItems = buildMealItems(rules, size, sides, entrees);
+
+    const extraCharge = entrees.reduce(
+      (sum, e) => sum + (Number(e.price) > 0 ? Number(e.price) : 0),
+      0
+    );
+    const lineItem = {
+      menuID: size.id,
+      quantity: 1,
+      mealItems,
+      itemname: `${formatSizeDisplayName(size.itemname)} – ${[
+        ...sides.map((s) => s.itemname),
+        ...entrees.map((e) => e.itemname),
+      ]
+        .filter(Boolean)
+        .join(", ")}`,
+      price: Number(size.price) + extraCharge,
+    };
+    if (editingIndex !== null) {
+      setOrderItems((prev) =>
+        prev.map((it, i) => (i === editingIndex ? lineItem : it))
+      );
+      setEditingIndex(null);
+      resetFlow();
+      return;
+    }
+
+    setOrderItems((prev) => [...prev, lineItem]);
+    resetFlow();
+  };
+  const addAppToOrder = () => {
+    if (!selectedApp) return;
+    if (editingIndex !== null) {
+      setOrderItems((prev) =>
+        prev.map((it, i) =>
+          i === editingIndex
+            ? {
+                menuID: selectedApp.id,
+                quantity: 1,
+                itemname: formatAppDisplayName(selectedApp.itemname),
+                price: selectedApp.price,
+              }
+            : it
+        )
+      );
+      setEditingIndex(null);
+      resetFlow();
+      return;
+    }
+    setOrderItems((prev) => [
+      ...prev,
+      {
+        menuID: selectedApp.id,
+        quantity: 1,
+        entrees: [],
+        itemname: formatAppDisplayName(selectedApp.itemname),
+        price: selectedApp.price,
+      },
+    ]);
+    resetFlow();
+  };
+  const addDrinkToOrder = () => {
+    if (!selectedDrink) return;
+    if (editingIndex !== null) {
+      setOrderItems((prev) =>
+        prev.map((it, i) =>
+          i === editingIndex
+            ? {
+                menuID: selectedDrink.id,
+                quantity: 1,
+                itemname: formatDrinkDisplayName(selectedDrink.itemname),
+                price: selectedDrink.price,
+              }
+            : it
+        )
+      );
+      setEditingIndex(null);
+      resetFlow();
+      return;
+    }
+    setOrderItems((prev) => [
+      ...prev,
+      {
+        menuID: selectedDrink.id,
+        quantity: 1,
+        entrees: [],
+        itemname: formatDrinkDisplayName(selectedDrink.itemname),
+        price: selectedDrink.price,
+      },
+    ]);
+    resetFlow();
+  };
+  const removeItem = (idx) => {
+    setOrderItems((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  /**
+   * Prepares the checkout modal.
+   * Validates that the cart is not empty before proceeding.
+   */
+  const completeOrder = async () => {
+    if (orderItems.length === 0) {
+      alert("Your order is empty.");
+      return;
+    }
+    // Open checkout modal for name/email / Google auth
+    setShowCheckout(true);
+  };
+
+  // Checkout modal state
+  const [showCheckout, setShowCheckout] = useState(false);
+  const [customerName, setCustomerName] = useState("");
+  const [customerEmail, setCustomerEmail] = useState("");
+  const [checkoutError, setCheckoutError] = useState("");
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [sendReceipt, setSendReceipt] = useState(false);
+  const [successInfo, setSuccessInfo] = useState(null); // { orderID, points }
+  // Clear checkout state when leaving the page/component
+  useEffect(() => {
+    return () => {
+      setShowCheckout(false);
+      setCustomerName("");
+      setCustomerEmail("");
+      setSendReceipt(false);
+    };
+  }, []);
+
+  // Auto-clear success banner after a short delay
+  useEffect(() => {
+    if (!successInfo) return;
+    const t = setTimeout(() => setSuccessInfo(null), 6000);
+    return () => clearTimeout(t);
+  }, [successInfo]);
+
+  const googleClientId = process.env.REACT_APP_GOOGLE_CLIENT_ID || "";
+
+  const validateEmail = (email) => {
+    if (!email) return false;
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return re.test(String(email).toLowerCase());
+  };
+
+  /**
+   * Validates customer input (Name/Email) and sends the order to the backend.
+   * Handles points calculation and receipt requests.
+   */
+  const submitCheckout = async () => {
+    setCheckoutError("");
+    if (orderItems.length === 0) return setCheckoutError("Order is empty");
+    const hasName = Boolean(customerName &amp;&amp; customerName.trim());
+    const hasValidEmail = Boolean(
+      customerEmail &amp;&amp; validateEmail(customerEmail)
+    );
+    if (sendReceipt &amp;&amp; !hasValidEmail) {
+      return setCheckoutError("Enter a valid email to receive a receipt");
+    }
+    if (!hasName &amp;&amp; !hasValidEmail) {
+      return setCheckoutError("Please sign in or enter your name");
+    }
+    if (customerEmail &amp;&amp; !validateEmail(customerEmail)) {
+      return setCheckoutError("Please enter a valid email or leave it blank");
+    }
+
+    setCheckoutLoading(true);
+    try {
+      const payload = {
+        email: customerEmail.trim(),
+        ...(customerName &amp;&amp; { name: customerName.trim() }),
+        paymentType: "Card",
+        cashierID: null,
+        lineItems: orderItems.map((it) => ({
+          menuID: it.menuID,
+          quantity: it.quantity,
+          entree: it.mealItems,
+        })),
+        wantsReceiptEmail: Boolean(sendReceipt),
+      };
+
+      const result = await client.createOrder(payload);
+      if (result.success) {
+        const pts =
+          typeof result.pointsAwarded === "number"
+            ? result.pointsAwarded
+            : result.order?.pointsAwarded ?? 0;
+        const totalPts =
+          typeof result.customerPointsTotal === "number"
+            ? result.customerPointsTotal
+            : result.order?.customerPointsTotal ?? null;
+        const oid = result.orderID || result.order?.id || "";
+        const emailAttempted =
+          typeof result.emailAttempted === "boolean"
+            ? result.emailAttempted
+            : !!result.order?.emailAttempted;
+        const emailPending =
+          typeof result.emailPending === "boolean"
+            ? result.emailPending
+            : !!result.order?.emailPending;
+        const emailSent =
+          typeof result.emailSent === "boolean"
+            ? result.emailSent
+            : !!result.order?.emailSent;
+        const receiptRequested = Boolean(sendReceipt);
+        setSuccessInfo({
+          orderID: oid,
+          points: pts,
+          totalPoints: totalPts,
+          emailAttempted,
+          emailPending,
+          emailSent,
+          receiptRequested,
+        });
+        setOrderItems([]);
+        setShowCheckout(false);
+        setCustomerName("");
+        setCustomerEmail("");
+        setSendReceipt(false);
+        resetFlow();
+      } else {
+        setCheckoutError(result.error || result.message || "Order failed");
+      }
+    } catch (err) {
+      setCheckoutError(err.message || "Network error");
+    } finally {
+      setCheckoutLoading(false);
+    }
+  };
+
+  /**
+   * Callback for successful Google OAuth login.
+   * Decodes the JWT token to extract Name and Email.
+   * @param {Object} credentialResponse - Response from Google Login API.
+   */
+  const handleGoogleSuccess = (credentialResponse) => {
+    try {
+      const token = credentialResponse?.credential;
+      if (!token) return setCheckoutError("Google sign-in failed");
+      // decode JWT payload to extract email and name
+      const base64Url = token.split(".")[1];
+      const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+      const jsonPayload = decodeURIComponent(
+        atob(base64)
+          .split("")
+          .map(function (c) {
+            return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
+          })
+          .join("")
+      );
+      const payload = JSON.parse(jsonPayload);
+      if (payload.email) setCustomerEmail(payload.email);
+      const firstName =
+        (payload.given_name || payload.name || "").split(" ")[0] || "";
+      if (firstName) setCustomerName(firstName);
+    } catch (e) {
+      console.error("Google parse failed", e);
+      setCheckoutError("Google sign-in failed");
+    }
+  };
+
+  const handleGoogleError = () => setCheckoutError("Google sign-in failed");
+
+  /**
+   * Renders the main landing page with menu categories.
+   * @returns {JSX.Element}
+   */
+  const renderHome = () => (
+    &lt;div className="kiosk-home">
+      &lt;div className="kiosk-title">
+        {/* LEFT: Panda Express Logo */}
+        &lt;img
+          src="/images/Panda-Express-Emblem.png" 
+          alt="Panda Express"
+          className="kiosk-logo"
+        />
+
+        &lt;h1 className="kiosk-title-center">Create Your Order&lt;/h1>
+
+        &lt;div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: "8px",
+          }}
+        >
+          &lt;Translate />
+          &lt;Weather />
+        &lt;/div>
+      &lt;/div>
+
+      &lt;p className="kiosk-subtitle">
+        Tap a meal, appetizer, a la carte, or drink to begin.
+      &lt;/p>
+
+      &lt;div className="kiosk-grid">
+        &lt;div className="kiosk-section">
+          &lt;h2 className="kiosk-section-title">Meals&lt;/h2>
+          &lt;div className="kiosk-pill-list">
+            {baseSizes.map((s) => (
+              &lt;button
+                key={s.id}
+                className={`kiosk-pill ${isOutOfStock(s) ? "disabled" : ""}`}
+                disabled={isOutOfStock(s)}
+                onClick={() => startMealFlow(s)}
+              >
+                &lt;PillImage src={s.imagepath} />
+                &lt;span className="kiosk-pill-main">
+                  {formatSizeDisplayName(s.itemname)}
+                &lt;/span>
+                &lt;span className="kiosk-pill-price">
+                  ${Number(s.price).toFixed(2)}
+                &lt;/span>
+              &lt;/button>
+            ))}
+          &lt;/div>
+        &lt;/div>
+        &lt;div className="kiosk-section">
+          &lt;h2 className="kiosk-section-title">Appetizers&lt;/h2>
+          &lt;div className="kiosk-pill-list">
+            {menu.appetizers.map((a) => (
+              &lt;button
+                key={a.id}
+                className={`kiosk-pill ${isOutOfStock(a) ? "disabled" : ""}`}
+                disabled={isOutOfStock(a)}
+                onClick={() => startAppFlow(a)}
+              >
+                &lt;PillImage src={a.imagepath} />
+                &lt;span className="kiosk-pill-main">
+                  {formatAppDisplayName(a.itemname)}
+                &lt;/span>
+                &lt;span className="kiosk-pill-price">
+                  ${Number(a.price).toFixed(2)}
+                &lt;/span>
+              &lt;/button>
+            ))}
+          &lt;/div>
+        &lt;/div>
+        &lt;div className="kiosk-section">
+          &lt;h2 className="kiosk-section-title">A La Carte&lt;/h2>
+          &lt;div className="kiosk-pill-list">
+            {aLaCarteSizes.map((s) => (
+              &lt;button
+                key={s.id}
+                className={`kiosk-pill ${isOutOfStock(s) ? "disabled" : ""}`}
+                disabled={isOutOfStock(s)}
+                onClick={() => startALaCarteFlow(s)}
+              >
+                &lt;PillImage src={s.imagepath} />
+                &lt;span className="kiosk-pill-main">
+                  {formatSizeDisplayName(s.itemname)}
+                &lt;/span>
+                &lt;span className="kiosk-pill-price">
+                  ${Number(s.price).toFixed(2)}
+                &lt;/span>
+              &lt;/button>
+            ))}
+          &lt;/div>
+        &lt;/div>
+        &lt;div className="kiosk-section">
+          &lt;h2 className="kiosk-section-title">Drinks&lt;/h2>
+          &lt;div className="kiosk-pill-list">
+            {menu.drinks.map((d) => (
+              &lt;button
+                key={d.id}
+                className={`kiosk-pill ${isOutOfStock(d) ? "disabled" : ""}`}
+                disabled={isOutOfStock(d)}
+                onClick={() => startDrinkFlow(d)}
+              >
+                &lt;PillImage src={d.imagepath} />
+                &lt;span className="kiosk-pill-main">
+                  {formatDrinkDisplayName(d.itemname)}
+                &lt;/span>
+                &lt;span className="kiosk-pill-price">
+                  ${Number(d.price).toFixed(2)}
+                &lt;/span>
+              &lt;/button>
+            ))}
+          &lt;/div>
+        &lt;/div>
+      &lt;/div>
+    &lt;/div>
+  );
+
+  /**
+   * Renders the multi-step flow for building a standard meal (Sides -> Entrees -> Review).
+   * @returns {JSX.Element}
+   */
+  const renderMealFlow = () => {
+    if (!builder.size) return null;
+    const rulesForBuilder = getRulesForSize(builder.size);
+
+    return (
+      &lt;div className="kiosk-flow">
+        &lt;div className="kiosk-flow-header">
+          &lt;div>
+            &lt;div className="kiosk-flow-title">
+              {formatSizeDisplayName(builder.size.itemname)}
+            &lt;/div>
+            &lt;div className="kiosk-flow-sub">Step {step} of 3&lt;/div>
+          &lt;/div>
+          &lt;button className="kiosk-link" onClick={resetFlow}>
+            Cancel and start over
+          &lt;/button>
+        &lt;/div>
+
+        {step === 1 &amp;&amp; (
+          &lt;>
+            &lt;h3 className="kiosk-step-title">
+              Choose your side{rulesForBuilder?.maxSides > 1 ? "s" : ""}{" "}
+              {rulesForBuilder &amp;&amp;
+                `(up to ${rulesForBuilder.maxSides} side${
+                  rulesForBuilder.maxSides > 1 ? "s" : ""
+                })`}
+            &lt;/h3>
+            &lt;div className="kiosk-grid-simple">
+              {menu.sides.map((s) => {
+                const selected = builder.sides.some((x) => x.id === s.id);
+                return (
+                  &lt;button
+                    key={s.id}
+                    className={
+                      "kiosk-choice" +
+                      (selected ? " kiosk-choice-selected" : "") +
+                      (isOutOfStock(s) ? " disabled" : "")
+                    }
+                    disabled={isOutOfStock(s)}
+                    onClick={() => toggleSide(s)}
+                  >
+                    &lt;ChoiceImage src={s.imagepath} />
+                    &lt;div className="kiosk-choice-text">{s.itemname}&lt;/div>
+                  &lt;/button>
+                );
+              })}
+            &lt;/div>
+
+            &lt;div className="kiosk-bottom">
+              &lt;button className="kiosk-secondary" onClick={resetFlow}>
+                Back to main menu
+              &lt;/button>
+              &lt;button
+                className="kiosk-primary"
+                disabled={
+                  rulesForBuilder?.requireSides &amp;&amp; builder.sides.length === 0
+                }
+                onClick={() => setStep(2)}
+              >
+                Next: Entrées
+              &lt;/button>
+            &lt;/div>
+          &lt;/>
+        )}
+
+        {step === 2 &amp;&amp; (
+          &lt;>
+            &lt;h3 className="kiosk-step-title">
+              Choose your entrée{rulesForBuilder?.maxEntrees > 1 ? "s" : ""}{" "}
+              {rulesForBuilder &amp;&amp;
+                `(up to ${rulesForBuilder.maxEntrees} entrée${
+                  rulesForBuilder.maxEntrees > 1 ? "s" : ""
+                })`}
+            &lt;/h3>
+            &lt;div className="kiosk-grid-simple">
+              {menu.entrees.map((e) => {
+                const selected = builder.entrees.some((x) => x.id === e.id);
+                return (
+                  &lt;button
+                    key={e.id}
+                    className={
+                      "kiosk-choice" +
+                      (selected ? " kiosk-choice-selected" : "") +
+                      (isOutOfStock(e) ? " disabled" : "")
+                    }
+                    disabled={isOutOfStock(e)}
+                    onClick={() => toggleEntree(e)}
+                  >
+                    &lt;ChoiceImage src={e.imagepath} />
+                    &lt;div className="kiosk-choice-text">
+                      &lt;div>{e.itemname}&lt;/div>
+                      {Number(e.price) > 0 &amp;&amp; (
+                        &lt;span className="kiosk-choice-extra">
+                          +${Number(e.price).toFixed(2)}
+                        &lt;/span>
+                      )}
+                    &lt;/div>
+                  &lt;/button>
+                );
+              })}
+            &lt;/div>
+
+            &lt;div className="kiosk-bottom">
+              &lt;button className="kiosk-secondary" onClick={() => setStep(1)}>
+                Back: Sides
+              &lt;/button>
+              &lt;button
+                className="kiosk-primary"
+                disabled={
+                  rulesForBuilder?.requireEntrees &amp;&amp;
+                  builder.entrees.length === 0
+                }
+                onClick={() => setStep(3)}
+              >
+                Review meal
+              &lt;/button>
+            &lt;/div>
+          &lt;/>
+        )}
+
+        {step === 3 &amp;&amp; (
+          &lt;>
+            &lt;h3 className="kiosk-step-title">Review your meal&lt;/h3>
+            &lt;div className="kiosk-review-card">
+              &lt;div className="kiosk-review-row">
+                &lt;span>Meal&lt;/span>
+                &lt;span>{formatSizeDisplayName(builder.size.itemname)}&lt;/span>
+              &lt;/div>
+              &lt;div className="kiosk-review-row">
+                &lt;span>Sides&lt;/span>
+                &lt;span>
+                  {builder.sides.length > 0
+                    ? builder.sides.map((s) => s.itemname).join(", ")
+                    : "None"}
+                &lt;/span>
+              &lt;/div>
+              &lt;div className="kiosk-review-row">
+                &lt;span>Entrées&lt;/span>
+                &lt;span>
+                  {builder.entrees.length > 0
+                    ? builder.entrees.map((e) => e.itemname).join(", ")
+                    : "None"}
+                &lt;/span>
+              &lt;/div>
+            &lt;/div>
+
+            &lt;div className="kiosk-bottom">
+              &lt;button className="kiosk-secondary" onClick={() => setStep(2)}>
+                Back: Entrées
+              &lt;/button>
+              &lt;div className="kiosk-bottom-right">
+                &lt;button className="kiosk-secondary" onClick={resetFlow}>
+                  Cancel
+                &lt;/button>
+                &lt;button className="kiosk-primary" onClick={addBuiltMealToOrder}>
+                  Add to order
+                &lt;/button>
+              &lt;/div>
+            &lt;/div>
+          &lt;/>
+        )}
+      &lt;/div>
+    );
+  };
+
+  /**
+   * Renders the flow for A La Carte items (Single Step selection).
+   * @returns {JSX.Element}
+   */
+  const renderALCFlow = () => {
+    if (!builder.size) return null;
+
+    const rules = getRulesForSize(builder.size);
+    const isEntreeMode = rules.kind === MEAL_TYPES.ALC_ENTREE;
+    const isSideMode = rules.kind === MEAL_TYPES.ALC_SIDE;
+    const stepCount = 2;
+
+    return (
+      &lt;div className="kiosk-flow">
+        &lt;div className="kiosk-flow-header">
+          &lt;div>
+            &lt;div className="kiosk-flow-title">
+              {formatSizeDisplayName(builder.size.itemname)}
+            &lt;/div>
+            &lt;div className="kiosk-flow-sub">
+              Step {step} of {stepCount}
+            &lt;/div>
+          &lt;/div>
+          &lt;button className="kiosk-link" onClick={resetFlow}>
+            Cancel and start over
+          &lt;/button>
+        &lt;/div>
+
+        {step === 1 &amp;&amp; (
+          &lt;>
+            {(() => {
+              let itemsToShow = [];
+              let toggle = () => {};
+              let selectedCheck = () => false;
+
+              if (isEntreeMode) {
+                itemsToShow = menu.entrees;
+                toggle = toggleEntree;
+                selectedCheck = (id) =>
+                  builder.entrees.some((e) => e.id === id);
+              }
+
+              if (isSideMode) {
+                itemsToShow = menu.sides;
+                toggle = toggleSide;
+                selectedCheck = (id) => builder.sides.some((s) => s.id === id);
+              }
+
+              return (
+                &lt;>
+                  &lt;h3 className="kiosk-step-title">
+                    {isEntreeMode ? "Choose your entrée" : "Choose your side"}
+                  &lt;/h3>
+
+                  &lt;div className="kiosk-grid-simple">
+                    {itemsToShow.map((item) => {
+                      const selected = selectedCheck(item.id);
+
+                      return (
+                        &lt;button
+                          key={item.id}
+                          className={
+                            "kiosk-choice" +
+                            (selected ? " kiosk-choice-selected" : "") +
+                            (isOutOfStock(item) ? " disabled" : "")
+                          }
+                          disabled={isOutOfStock(item)}
+                          onClick={() => toggle(item)}
+                        >
+                          &lt;ChoiceImage src={item.imagepath} />
+                          &lt;div className="kiosk-choice-text">
+                            &lt;div>{item.itemname}&lt;/div>
+                            {isEntreeMode &amp;&amp; Number(item.price) > 0 &amp;&amp; (
+                              &lt;span className="kiosk-choice-extra">
+                                +${Number(item.price).toFixed(2)}
+                              &lt;/span>
+                            )}
+                          &lt;/div>
+                        &lt;/button>
+                      );
+                    })}
+                  &lt;/div>
+
+                  &lt;div className="kiosk-bottom">
+                    &lt;button className="kiosk-secondary" onClick={resetFlow}>
+                      Back to main menu
+                    &lt;/button>
+
+                    &lt;button
+                      className="kiosk-primary"
+                      disabled={
+                        isEntreeMode
+                          ? builder.entrees.length === 0
+                          : builder.sides.length === 0
+                      }
+                      onClick={() => setStep(2)}
+                    >
+                      Review item
+                    &lt;/button>
+                  &lt;/div>
+                &lt;/>
+              );
+            })()}
+          &lt;/>
+        )}
+
+        {step === 2 &amp;&amp; (
+          &lt;>
+            &lt;h3 className="kiosk-step-title">Review your selection&lt;/h3>
+            &lt;div className="kiosk-review-card">
+              &lt;div className="kiosk-review-row">
+                &lt;span>Item&lt;/span>
+                &lt;span>{formatSizeDisplayName(builder.size.itemname)}&lt;/span>
+              &lt;/div>
+              &lt;div className="kiosk-review-row">
+                &lt;span>{isEntreeMode ? "Entrée" : "Side"}&lt;/span>
+                &lt;span>
+                  {isEntreeMode
+                    ? builder.entrees.map((e) => e.itemname).join(", ") ||
+                      "None"
+                    : builder.sides.map((s) => s.itemname).join(", ") || "None"}
+                &lt;/span>
+              &lt;/div>
+            &lt;/div>
+
+            &lt;div className="kiosk-bottom">
+              &lt;button className="kiosk-secondary" onClick={() => setStep(1)}>
+                Back
+              &lt;/button>
+              &lt;div className="kiosk-bottom-right">
+                &lt;button className="kiosk-secondary" onClick={resetFlow}>
+                  Cancel
+                &lt;/button>
+                &lt;button className="kiosk-primary" onClick={addBuiltMealToOrder}>
+                  Add to order
+                &lt;/button>
+              &lt;/div>
+            &lt;/div>
+          &lt;/>
+        )}
+      &lt;/div>
+    );
+  };
+
+  /**
+   * Renders the confirmation flow for single items (Drinks/Appetizers).
+   * @param {string} kind - 'APP' or 'DRINK'.
+   * @returns {JSX.Element}
+   */
+  const renderSingleFlow = (kind) => {
+    const isApp = kind === "APP";
+    const item = isApp ? selectedApp : selectedDrink;
+    if (!item) return null;
+
+    const displayName = isApp
+      ? formatAppDisplayName(item.itemname)
+      : formatDrinkDisplayName(item.itemname);
+
+    const handleAdd = isApp ? addAppToOrder : addDrinkToOrder;
+
+    return (
+      &lt;div className="kiosk-flow">
+        &lt;div className="kiosk-flow-header">
+          &lt;div>
+            &lt;div className="kiosk-flow-title">{displayName}&lt;/div>
+            &lt;div className="kiosk-flow-sub">
+              {isApp ? "Appetizer" : "Drink"}
+            &lt;/div>
+          &lt;/div>
+          &lt;button className="kiosk-link" onClick={resetFlow}>
+            Cancel and start over
+          &lt;/button>
+        &lt;/div>
+
+        &lt;div className="kiosk-review-card kiosk-review-large">
+          &lt;div className="kiosk-review-row">
+            &lt;span>Item&lt;/span>
+            &lt;span>{displayName}&lt;/span>
+          &lt;/div>
+          &lt;div className="kiosk-review-row">
+            &lt;span>Price&lt;/span>
+            &lt;span>${Number(item.price).toFixed(2)}&lt;/span>
+          &lt;/div>
+        &lt;/div>
+
+        &lt;div className="kiosk-bottom">
+          &lt;button className="kiosk-secondary" onClick={resetFlow}>
+            Back to main menu
+          &lt;/button>
+          &lt;div className="kiosk-bottom-right">
+            &lt;button className="kiosk-secondary" onClick={resetFlow}>
+              Cancel
+            &lt;/button>
+            &lt;button className="kiosk-primary" onClick={handleAdd}>
+              Add to order
+            &lt;/button>
+          &lt;/div>
+        &lt;/div>
+      &lt;/div>
+    );
+  };
+
+  return (
+    &lt;div className="kiosk-page">
+      {successInfo &amp;&amp; (
+        &lt;div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: 16,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "#0a7d34",
+            color: "#fff",
+            padding: "10px 16px",
+            borderRadius: 8,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+            zIndex: 1000,
+            fontSize: 16,
+            fontWeight: 600,
+          }}
+        >
+          &lt;div>
+            Order #{successInfo.orderID} complete — you earned{" "}
+            {successInfo.points} points!
+            {typeof successInfo.totalPoints === "number" &amp;&amp; (
+              &lt;> You now have {successInfo.totalPoints} points.&lt;/>
+            )}
+          &lt;/div>
+          {successInfo.receiptRequested &amp;&amp; (
+            &lt;div style={{ fontSize: 14, fontWeight: 500 }}>
+              {successInfo.emailAttempted
+                ? successInfo.emailPending
+                  ? "Sending receipt…"
+                  : successInfo.emailSent
+                  ? "Receipt emailed successfully."
+                  : "Receipt could not be sent."
+                : "Receipt email was not attempted."}
+            &lt;/div>
+          )}
+        &lt;/div>
+      )}
+      &lt;div className="kiosk-left">
+        &lt;h2 className="kiosk-left-title">Your Order&lt;/h2>
+
+        {sessionMessage &amp;&amp; (
+          &lt;div className="kiosk-session-banner">{sessionMessage}&lt;/div>
+        )}
+
+        &lt;div className="kiosk-order-list">
+          {orderItems.length === 0 ? (
+            &lt;div className="kiosk-empty">No items yet&lt;/div>
+          ) : (
+            orderItems.map((it, idx) => (
+              &lt;div key={idx} className="kiosk-order-row">
+                &lt;div className="kiosk-order-main">
+                  &lt;span className="kiosk-order-name">{it.itemname}&lt;/span>
+                  &lt;span className="kiosk-order-price">
+                    ${Number(it.price).toFixed(2)}
+                  &lt;/span>
+                &lt;/div>
+                &lt;div
+                  style={{ display: "flex", alignItems: "center", gap: "6px" }}
+                >
+                  {/* Edit button for meals / ALC */}
+                  {(() => {
+                    const isMeal = menu.size.some(
+                      (s) =>
+                        s.id === it.menuID &amp;&amp;
+                        !s.itemname.toLowerCase().includes("carte")
+                    );
+
+                    const isALC = menu.size.some(
+                      (s) =>
+                        s.id === it.menuID &amp;&amp;
+                        s.itemname.toLowerCase().includes("carte")
+                    );
+
+                    if (isMeal || isALC) {
+                      return (
+                        &lt;button
+                          className="kiosk-edit"
+                          aria-label="Edit item"
+                          onClick={() => editItem(idx)}
+                        >
+                          ✎
+                        &lt;/button>
+                      );
+                    }
+                    return null;
+                  })()}
+
+                  &lt;button
+                    className="kiosk-remove"
+                    aria-label="Remove item"
+                    onClick={() => removeItem(idx)}
+                  >
+                    ✕
+                  &lt;/button>
+                &lt;/div>
+              &lt;/div>
+            ))
+          )}
+        &lt;/div>
+
+        &lt;div className="kiosk-totals">
+          &lt;div className="kiosk-total-row">
+            &lt;span>Subtotal&lt;/span>
+            &lt;span>${subtotal.toFixed(2)}&lt;/span>
+          &lt;/div>
+          &lt;button className="kiosk-complete" onClick={completeOrder}>
+            Place order
+          &lt;/button>
+        &lt;/div>
+      &lt;/div>
+      &lt;div className="kiosk-right">
+        {flow === FLOW.HOME &amp;&amp; renderHome()}
+        {flow === FLOW.MEAL &amp;&amp; renderMealFlow()}
+        {flow === FLOW.ALC &amp;&amp; renderALCFlow()}
+        {flow === FLOW.APP &amp;&amp; renderSingleFlow("APP")}
+        {flow === FLOW.DRINK &amp;&amp; renderSingleFlow("DRINK")}
+      &lt;/div>
+
+      {showCheckout &amp;&amp; (
+        &lt;div className="kiosk-checkout-overlay">
+          &lt;div
+            className="kiosk-checkout-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="checkout-title"
+          >
+            &lt;h3 id="checkout-title">Complete your order&lt;/h3>
+            &lt;p>Please sign in with Google or enter your email to receive points.&lt;/p>
+
+            &lt;div className="kiosk-checkout-row">
+              &lt;label>Name&lt;/label>
+              &lt;input
+                type="text"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                placeholder="Enter your name"
+              />
+            &lt;/div>
+
+            &lt;div className="kiosk-checkout-row">
+              &lt;label>Email&lt;/label>
+              &lt;input
+                type="email"
+                value={customerEmail}
+                onChange={(e) => setCustomerEmail(e.target.value)}
+              />
+            &lt;/div>
+
+            &lt;div className="kiosk-checkout-row" style={{ alignItems: "center" }}>
+              &lt;label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                &lt;input
+                  type="checkbox"
+                  checked={sendReceipt}
+                  onChange={(e) => setSendReceipt(e.target.checked)}
+                />
+                &lt;span>Send receipt to this email&lt;/span>
+              &lt;/label>
+            &lt;/div>
+
+            &lt;div style={{ margin: "8px 0" }}>
+              {googleClientId ? (
+                &lt;GoogleOAuthProvider clientId={googleClientId}>
+                  &lt;GoogleLogin
+                    onSuccess={handleGoogleSuccess}
+                    onError={handleGoogleError}
+                  />
+                &lt;/GoogleOAuthProvider>
+              ) : (
+                &lt;div style={{ fontSize: 12, color: "#666" }}>
+                  Google Client ID not configured
+                &lt;/div>
+              )}
+            &lt;/div>
+
+            {checkoutError &amp;&amp; (
+              &lt;div className="kiosk-checkout-error">{checkoutError}&lt;/div>
+            )}
+
+            &lt;div className="kiosk-checkout-actions">
+              &lt;button
+                className="kiosk-secondary"
+                onClick={() => setShowCheckout(false)}
+                disabled={checkoutLoading}
+              >
+                Cancel
+              &lt;/button>
+              &lt;button
+                className="kiosk-primary"
+                onClick={submitCheckout}
+                disabled={
+                  checkoutLoading ||
+                  (!customerName.trim() &amp;&amp; !validateEmail(customerEmail)) ||
+                  (sendReceipt &amp;&amp; !validateEmail(customerEmail))
+                }
+              >
+                {checkoutLoading ? "Processing…" : "Submit &amp; Pay"}
+              &lt;/button>
+            &lt;/div>
+          &lt;/div>
+        &lt;/div>
+      )}
+    &lt;/div>
+  );
+}</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

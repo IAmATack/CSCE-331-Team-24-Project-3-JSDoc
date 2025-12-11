@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: employee-side/Inventory.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: employee-side/Inventory.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import React from "react";
+import { Link } from 'react-router-dom';
+import "./Inventory.css";
+import "./Manager.css";
+import Dropdown from "../components/Dropdown/Dropdown.js";
+import DropdownItem from "../components/Dropdown/DropdownItem.js";
+import client from './clientConnection.js';
+
+/**
+ * Inventory component: UI and logic for managing inventory items.
+ *
+ * - Loads inventory item names and details via `client`.
+ * - Allows selecting an item, updating fields, refilling stock (single or to target),
+ *   generating a restock report, and adding new inventory items.
+ */
+function Inventory() {
+    /** Displayable field labels used by update dropdowns */
+    const fields = ["Name", "Price", "Stock", "Target Stock"];
+
+    /**
+     * Inventory item list (loaded from `inventory` table)
+     * @type {Array&lt;Object>}
+     */
+    const [items, setItems] = React.useState([]);
+
+    /**
+     * Selected inventory item details shown in the UI
+     * @type {{id:number,itemname:string,price:number,stock:number,targetStock:number}}
+     */
+    const [selectedItem, updateSelectedItem] = React.useState ({
+        id: -1,
+        itemname: "Select an Item",
+        price: 0.0,
+        stock: 0,
+        targetStock: 0,
+    });
+
+    /** New item name (Add Item form) */
+    const [newItemName, setNewItemName] = React.useState("");
+
+    /** New item target stock (Add Item form) */
+    const [newItemTargetStock, setNewItemTargetStock] = React.useState(0);
+
+    /** New item price (Add Item form) */
+    const [newItemPrice, setNewItemPrice] = React.useState(0);
+    
+
+    /**
+     * Load list of inventory item names on component mount
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        const fetchItems = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "inventory",
+                    columns: ["itemname"],
+                });
+                setItems(data);
+            } catch (error) {
+                console.error("An error occurred:", error.message);
+                setItems(["Unable to load items"]);
+            }
+        };
+
+        fetchItems();
+    }, []);
+
+    /**
+     * When `selectedItem.itemname` changes, fetch full details for that item
+     * @returns {void}
+     */
+    React.useEffect(() => {
+        if (!selectedItem.itemname || selectedItem.itemname === "Select an Item") return; // do nothing if no selection
+
+
+        const fetchItemDetails = async () => {
+            try {
+                const data = await client.genericTableGet({
+                    table: "inventory",
+                    columns: ["id", "itemname", "price", "stock", "targetstock"],
+                });
+
+                // Filter the result for the selected Item
+                const itm = data.find(e => e.itemname === selectedItem.itemname);
+
+                if (itm) {
+                    updateSelectedItem({
+                        id: itm.id ?? -1,
+                        itemname: itm.itemname ?? "",
+                        price: itm.price ?? 0.0,
+                        stock: itm.stock ?? 0,
+                        targetStock: itm.targetstock ?? 0,
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to fetch item details:", error.message);
+            }
+        };
+
+        fetchItemDetails();
+    }, [selectedItem.itemname]);
+
+    /**
+     * Select an inventory item by name; triggers detail fetch via effect.
+     * @param {string} name
+     * @returns {void}
+     */
+    const onItemSelect = (name) => {
+        updateSelectedItem({
+            itemname: name,
+        })
+    }
+
+    /** Which field is selected for updating the current item */
+    const [selectedItemField, updateSelectedItemField] = React.useState("Field to Update");
+
+    const onItemFieldSelect = (name) => {
+        updateSelectedItemField(name);
+    }
+
+    /** New value entered for the selected field */
+    const [newItemValue, setNewItemValue] = React.useState("");
+
+    /**
+     * Validate and submit a single-field update for the selected inventory item.
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onUpdateItemClick = async () => {
+        if (!selectedItem.itemname || !selectedItemField || newItemValue === "") {
+            alert("Please select an item, a field, and enter a new value");
+            return;
+        }
+
+
+        try {
+            // Map field names to database column names
+            const columnMap = {
+                "Name": "itemname",
+                "Price": "price",
+                "Stock": "stock",
+                "Target Stock": "targetstock"
+            };
+
+            const column = columnMap[selectedItemField];
+
+            if (!column) throw new Error("Invalid field selected");
+            
+            // Explicit type conversion if necessary
+            let valueToSet;
+            if (column === "price" || column === "stock" || column === "targetstock") {
+                valueToSet = Number(newItemValue);
+            } else {
+                valueToSet = newItemValue;
+            }
+
+            await client.genericTableSet({
+                table: "inventory",
+                column: column,
+                value: valueToSet,
+                id: selectedItem.id 
+            });
+
+            alert("Item updated successfully!");
+
+            const updatedData = await client.genericTableGet({
+                table: "inventory",
+                columns: ["id", "itemname", "price", "stock", "targetstock"],
+                id: selectedItem.id
+            });
+
+            if (updatedData &amp;&amp; updatedData.length > 0) {
+                const itm = updatedData[0];
+                updateSelectedItem({
+                    id: itm.id ?? -1,
+                    itemname: itm.itemname ?? "",
+                    price: itm.price ?? 0.0,
+                    stock: itm.stock ?? 0,
+                    targetStock: itm.targetstock ?? 0,
+                });
+            }
+        } catch (error) {
+            console.error("Failed to update item:", error);
+            alert("Failed to update item: " + error.message);
+        }
+    }
+
+    /** Report table rows for the inventory restock report */
+    const [reportTableData, setReportTableData] = React.useState([]);
+
+    /**
+     * Generate an inventory restock report (items below target stock).
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onGenerateInventoryReportClick = async () => {
+
+        try {
+            const items = await client.getReport(23);
+            const reportItems = items.data.filter(item => item.stock &lt; item.targetstock);
+            setReportTableData(reportItems);
+        } catch (error) {
+            console.error("Failed to get items:", error);
+            alert("Failed to get items: " + error.message);
+        }
+    }
+
+    /**
+     * Refill the selected item's stock by one unit and refresh state
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onRefillSingleClick = async () => {
+
+        try {
+            await client.genericTableSet({
+                table: "inventory",
+                column: "stock",
+                value: Number(selectedItem.stock)+1,
+                id: selectedItem.id 
+            });
+
+            alert("Item refilled successfully!");
+
+            const updatedData = await client.genericTableGet({
+                table: "inventory",
+                columns: ["id", "itemname", "price", "stock", "targetstock"],
+                id: selectedItem.id
+            });
+
+            if (updatedData &amp;&amp; updatedData.length > 0) {
+                const itm = updatedData[0];
+                updateSelectedItem({
+                    id: itm.id ?? -1,
+                    itemname: itm.itemname ?? "",
+                    price: itm.price ?? 0.0,
+                    stock: itm.stock ?? 0,
+                    targetStock: itm.targetstock ?? 0,
+                });
+            }
+
+            if (reportTableData.includes(selectedItem)) {
+                setReportTableData(oldItems =>
+                    oldItems.map(item =>
+                        item.itemname === updatedData.itemname ? { ...item, stock: updatedData.stock} : item
+                    )
+                );
+
+            }
+        } catch (error) {
+            console.error("Failed to refill item:", error);
+            alert("Failed to refill item: " + error.message);
+        }
+    }
+
+    /**
+     * Refill the provided item up to its target stock and refresh state
+     * @param {Object} itemData
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onRefillWholeClick = async (itemData) => {
+
+        let valueToSet = (itemData.targetstock || itemData.targetStock)
+
+        try {
+            await client.genericTableSet({
+                table: "inventory",
+                column: "stock",
+                value: Number(valueToSet),
+                id: itemData.id 
+            });
+
+            alert("Item refilled successfully!");
+
+            const updatedData = await client.genericTableGet({
+                table: "inventory",
+                columns: ["id", "itemname", "price", "stock", "targetstock"],
+                id: itemData.id
+            });
+
+            console.log(selectedItem.itemname)
+            if (selectedItem.itemname === itemData.itemname) {
+                if (updatedData &amp;&amp; updatedData.length > 0) {
+                    const itm = updatedData[0];
+                    updateSelectedItem({
+                        id: itm.id ?? -1,
+                        itemname: itm.itemname ?? "",
+                        price: itm.price ?? 0.0,
+                        stock: itm.stock ?? 0,
+                        targetStock: itm.targetstock ?? 0,
+                    });
+                }
+            }
+
+            if (reportTableData.includes(itemData)) {
+                setReportTableData(oldItems =>
+                    oldItems.map(item =>
+                        item.itemname === updatedData[0].itemname ? { ...item, stock: updatedData[0].stock} : item
+                    )
+                );
+
+            }
+        } catch (error) {
+            console.error("Failed to refill item:", error);
+            alert("Failed to refill item: " + error.message);
+        }
+    }
+
+    /**
+     * Create a new inventory item using values from the Add Item form
+     * @async
+     * @returns {Promise&lt;void>}
+     */
+    const onAddItemClick = async () => {
+
+        try {
+            await client.genericTableCreate({
+                table: "inventory",
+                column: "stock",
+                values: {
+                    itemname: newItemName,
+                    price: newItemPrice,
+                    stock: 0,
+                    targetstock: newItemTargetStock
+                }
+            });
+
+            alert("Item refilled successfully!");
+        } catch (error) {
+            console.error("Failed to add item:", error);
+            alert("Failed to add item: " + error.message);
+        }
+    }
+
+    /** Render UI: inventory controls, report, and add-item form */
+    return (
+    &lt;div>
+        {/* Navigation Landmark */}
+        &lt;nav
+        role="navigation"
+        aria-label="Inventory navigation"
+        style={{ padding: "10px", backgroundColor: "#f0f0f0" }}
+        >
+        &lt;Link to="/manager" style={{ margin: "10px" }}>Manager Home&lt;/Link>
+        &lt;Link to="/employees" style={{ margin: "10px" }}>Employees&lt;/Link>
+        &lt;Link to="/inventory" style={{ margin: "10px" }}>Inventory&lt;/Link>
+        &lt;Link to="/menu" style={{ margin: "10px" }}>Menu&lt;/Link>
+        &lt;Link to="/reports" style={{ margin: "10px" }}>Reports&lt;/Link>
+        &lt;/nav>
+
+        &lt;div className="grid-container">
+        {/* ---------- ITEMS COLUMN ---------- */}
+        &lt;div className="column">
+            &lt;h2 id="inventory-items-heading">Inventory Items&lt;/h2>
+
+            &lt;Dropdown
+            buttonText={selectedItem.itemname}
+            role="menu"
+            ariaLabelledBy="inventory-items-heading"
+            >
+            {items.map((itm, index) => (
+                &lt;DropdownItem
+                key={index}
+                onClick={() => onItemSelect(itm.itemname)}
+                role="menuitem"
+                >
+                {itm.itemname}
+                &lt;/DropdownItem>
+            ))}
+            &lt;/Dropdown>
+
+            &lt;progress
+            value={selectedItem.stock}
+            max={selectedItem.targetStock}
+            aria-valuenow={selectedItem.stock}
+            aria-valuemax={selectedItem.targetStock}
+            aria-label={`Stock level for ${selectedItem.itemname}`}
+            />
+
+            &lt;table role="table" aria-labelledby="inventory-items-heading">
+            &lt;tbody>
+                &lt;tr>
+                &lt;th scope="row">Name:&lt;/th>
+                &lt;td>{selectedItem.itemname}&lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;th scope="row">Price:&lt;/th>
+                &lt;td>{selectedItem.price}&lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;th scope="row">Stock:&lt;/th>
+                &lt;td>{selectedItem.stock}&lt;/td>
+                &lt;/tr>
+                &lt;tr>
+                &lt;th scope="row">Target Stock:&lt;/th>
+                &lt;td>{selectedItem.targetStock}&lt;/td>
+                &lt;/tr>
+            &lt;/tbody>
+            &lt;/table>
+
+            &lt;button
+            className="defaultButton"
+            onClick={onRefillSingleClick}
+            aria-label={`Refill 1 unit for ${selectedItem.itemname} at $${selectedItem.price}`}
+            >
+            Refill 1 (${selectedItem.price})
+            &lt;/button>
+
+            &lt;button
+            className="defaultButton"
+            onClick={() => onRefillWholeClick(selectedItem)}
+            aria-label={`Refill ${selectedItem.itemname} to target stock at $${Math.max(selectedItem.targetStock - selectedItem.stock, 0) * selectedItem.price}`}
+            >
+            Refill to Target (${(selectedItem.targetStock - selectedItem.stock > 0) ? selectedItem.price*(selectedItem.targetStock-selectedItem.stock) : 0})
+            &lt;/button>
+
+            &lt;Dropdown
+            buttonText={selectedItemField}
+            role="menu"
+            ariaLabel="Select item field to update"
+            >
+            {fields.map((field) => (
+                &lt;DropdownItem
+                key={field}
+                onClick={() => onItemFieldSelect(field)}
+                role="menuitem"
+                >
+                {field}
+                &lt;/DropdownItem>
+            ))}
+            &lt;/Dropdown>
+
+            &lt;label htmlFor="new-item-value">New Value:&lt;/label>
+            &lt;input
+            id="new-item-value"
+            value={newItemValue}
+            onChange={(e) => setNewItemValue(e.target.value)}
+            />
+
+            &lt;button
+            className="defaultButton"
+            onClick={onUpdateItemClick}
+            aria-label="Save updated item value"
+            >
+            Save
+            &lt;/button>
+        &lt;/div>
+
+        {/* ---------- REPORT &amp; ADD ITEM COLUMN ---------- */}
+        &lt;div className="column">
+            &lt;h2 id="inventory-report-heading">Inventory Restock Report&lt;/h2>
+
+            &lt;button
+            className="defaultButton"
+            onClick={onGenerateInventoryReportClick}
+            aria-label="Generate Inventory Restock Report"
+            >
+            Generate Inventory Restock Report
+            &lt;/button>
+
+            &lt;div className="reportTable">
+            &lt;table role="table" aria-labelledby="inventory-report-heading">
+                &lt;thead>
+                &lt;tr>
+                    &lt;th scope="col">Name&lt;/th>
+                    &lt;th scope="col">Price&lt;/th>
+                    &lt;th scope="col">Stock&lt;/th>
+                    &lt;th scope="col">Target Stock&lt;/th>
+                    &lt;th scope="col">Refill&lt;/th>
+                &lt;/tr>
+                &lt;/thead>
+                &lt;tbody>
+                {reportTableData.map((rowItem) => (
+                    &lt;tr key={rowItem.itemname}>
+                    &lt;td>{rowItem.itemname}&lt;/td>
+                    &lt;td>{rowItem.price}&lt;/td>
+                    &lt;td>{rowItem.stock}&lt;/td>
+                    &lt;td>{rowItem.targetstock}&lt;/td>
+                    &lt;td>
+                        &lt;button
+                        onClick={() => onRefillWholeClick(rowItem)}
+                        aria-label={`Refill ${rowItem.itemname} to target stock at $${Math.max(rowItem.targetstock - rowItem.stock, 0) * rowItem.price}`}
+                        >
+                        Refill to Target (${(rowItem.targetstock - rowItem.stock > 0) ? rowItem.price*(rowItem.targetstock-rowItem.stock) : 0})
+                        &lt;/button>
+                    &lt;/td>
+                    &lt;/tr>
+                ))}
+                &lt;/tbody>
+            &lt;/table>
+            &lt;/div>
+
+            &lt;h2 id="add-item-heading">Add Item&lt;/h2>
+            &lt;div className="grid-container">
+            &lt;div className="nestedColumn">
+                &lt;label htmlFor="new-item-name">Name:&lt;/label>
+                &lt;input
+                id="new-item-name"
+                value={newItemName}
+                onChange={(e) => setNewItemName(e.target.value)}
+                />
+
+                &lt;label htmlFor="new-item-target-stock">Target Stock:&lt;/label>
+                &lt;input
+                id="new-item-target-stock"
+                type="number"
+                value={newItemTargetStock}
+                onChange={(e) => setNewItemTargetStock(Number(e.target.value))}
+                min="0"
+                max="1000"
+                step="1"
+                />
+            &lt;/div>
+
+            &lt;div className="nestedColumn">
+                &lt;label htmlFor="new-item-price">Price:&lt;/label>
+                &lt;input
+                id="new-item-price"
+                type="number"
+                value={newItemPrice}
+                onChange={(e) => setNewItemPrice(Number(e.target.value))}
+                min="0"
+                max="100"
+                step=".25"
+                />
+
+                &lt;button
+                className="defaultButton"
+                onClick={onAddItemClick}
+                aria-label="Save new item"
+                >
+                Save
+                &lt;/button>
+            &lt;/div>
+            &lt;/div>
+        &lt;/div>
+        &lt;/div>
+    &lt;/div>
+    );
+}
+
+export default Inventory;</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

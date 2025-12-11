@@ -1,0 +1,1147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/databaseAccess.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/databaseAccess.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import { Client } from "pg";
+import { pool } from "./db.js";
+import SpecialReports from "./specialReports.js";
+
+/**
+ * Database access layer.
+ *
+ * Responsibilities:
+ * - Execute parameterized SQL using a shared pool.
+ * - Provide generic CRUD helpers used by the logic layer.
+ * - Offer report utilities and transaction-aware insert helpers.
+ * - Keep logging minimal; focus on query execution and row counts.
+ */
+export class DatabaseAccess {
+  constructor() {
+    this.specialReports = new SpecialReports();
+  }
+
+  /**
+ * Formats a date value into `"YYYY-MM-DD HH:mm:SS"` for report generation.
+ *
+ * Accepts:
+ *  - JavaScript Date objects
+ *  - ISO date strings (e.g., "2023-05-10T14:30:00Z")
+ *  - "YYYY-MM-DD HH:mm:SS" strings (returned unchanged)
+ *  - "YYYY-MM-DD" strings (assumes start of day)
+ *
+ * @param {Date|string|null} date - The date to format.
+ * @returns {string|null} The formatted date string or null if input is falsy.
+ */
+  formatDate(date) {
+      if (!date) return null;
+      if (date instanceof Date) {
+        return date.toISOString().slice(0, 19).replace('T', ' ');
+      }
+      if (typeof date === 'string') {
+        if (date.includes('T') || date.includes('Z')) {
+          const parsedDate = new Date(date);
+          if (!isNaN(parsedDate.getTime())) {
+            return parsedDate.toISOString().slice(0, 19).replace('T', ' ');
+          }
+        }
+        if (date.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)) {
+          return date;
+        }
+        if (date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          return date + ' 00:00:00';
+        }
+      }
+      return date;
+    };
+
+  /**
+  * Return a simple boolean indicating DB connectivity.
+  * @returns {boolean} true or false depending on the DB connectivity
+   */
+  /**
+   * Check database connectivity.
+   * @returns {Promise&lt;boolean>} True if a simple query succeeds.
+   */
+  async getDatabaseStatus() {
+    const result = await pool.query('SELECT 1 AS result');
+    return result &amp;&amp; result.rows &amp;&amp; result.rows[0] ? result.rows[0].result === 1 : false;
+  }
+
+  /**
+ * @deprecated This function uses legacy plaintext password validation.
+ *            Use genericTableGet() instead.
+ * 
+ * Validates a manager's login credentials by comparing the provided 
+ * password with the stored password in the database.
+ *
+ * @param {string} username - The manager's username used in the DB query.
+ * @param {string} password - The plaintext password to validate.
+ * @returns {boolean} True if the username exists and the password matches; otherwise false.
+ */
+  async validateLoginManagers({username, password}) {
+    console.log("Validating login for " + username);
+    const result = await pool.query("SELECT _password FROM managers WHERE username=$1;",
+      [username]
+    );
+
+    if(result.rows.length === 0){
+      console.log("Username not found");
+      return false;
+    }
+
+    const databasePassword = result.rows[0]._password;
+    return databasePassword===password;
+  }
+  
+  /**
+ * Retrieves schema information (table name, column name, and data type)
+ * for all tables in the public schema.
+ *
+ * @returns {Promise&lt;Array&lt;{table_name: string, column_name: string, data_type: string}>>}
+ *   An array of objects describing each column in the database.
+ */
+  /**
+   * Retrieve schema (public tables) with column names and data types.
+   * @returns {Promise&lt;Array>} Rows with table_name, column_name, data_type.
+   */
+  async getTableSchema() {
+    console.log("Fetching: Database schema");
+    
+    const result = await pool.query(`
+      SELECT 
+        table_name,
+        column_name,
+        data_type
+      FROM 
+        information_schema.columns
+      WHERE 
+        table_schema = 'public'
+      ORDER BY 
+        table_name, ordinal_position;
+    `);
+    
+    console.log("Retrieved: Database schema");
+    return result.rows;
+  }
+  
+  /**
+   * Generic table query - executes pre-validated queries
+   * WARNING: This method assumes validation has been done by the caller
+   * @param {string} query - The complete SQL query to execute
+   * @param {Array} params - Query parameters for parameterized queries
+   * @returns {Promise&lt;Array>} Query results
+   */
+  /**
+   * Execute a SELECT query with parameters.
+   * @param {string} query
+   * @param {Array} [params=[]]
+   * @returns {Promise&lt;Array>} Result rows.
+   */
+  async genericTableGet(query, params = []) {
+    // Minimal logging to reduce noise; enable via DEBUG_SQL if needed
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log("Executing query:", query);
+    }
+    
+    const result = await pool.query(query, params);
+    
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log(`Retrieved: ${result.rows.length} row(s)`);
+    }
+    return result.rows;
+  }
+
+  /**
+   * Generic table update - executes pre-validated UPDATE queries
+   * WARNING: This method assumes validation has been done by the caller
+   * @param {string} query - The complete SQL UPDATE query to execute
+   * @param {Array} params - Query parameters for parameterized queries
+   * @returns {Promise&lt;Object>} Updated row
+   */
+  /**
+   * Execute an UPDATE query with parameters.
+   * @param {string} query
+   * @param {Array} [params=[]]
+   * @returns {Promise&lt;Object>} First row from RETURNING clause.
+   */
+  async genericTableSet(query, params = []) {
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log("Executing update query:", query);
+      console.log("With params:", params);
+    }
+    
+    const result = await pool.query(query, params);
+    
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log(`Updated: ${result.rowCount} row(s)`);
+    }
+    return result.rows[0];
+  }
+
+  
+
+  /**
+   * Generic table create - executes pre-validated INSERT queries that create new table entries
+   * WARNING: This method assumes validation has been done by the caller
+   * @param {string} query - The complete SQL INSERT query to execute
+   * @param {Array} params - Query parameters for parameterized queries
+   * @returns {Promise&lt;Object>} Updated row
+   */
+  /**
+   * Execute an INSERT query with parameters.
+   * @param {string} query
+   * @param {Array} [params=[]]
+   * @returns {Promise&lt;Object>} First row from RETURNING clause.
+   */
+  async genericTableCreate(query, params = []) {
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log("🔄 genericTableCreate");
+    }
+    
+    const result = await pool.query(query, params);
+    
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log(`✅ genericTableCreate - Created: ${result.rowCount} row(s)`);
+    }
+    return result.rows[0];
+  }
+
+  /**
+   * Execute a DELETE query with parameters.
+   * @param {string} query
+   * @param {Array} [params=[]]
+   * @returns {Promise&lt;number>} Number of deleted rows.
+   */
+  async genericTableDelete(query, params = []) {
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log("Executing delete query:", query);
+      console.log("With params:", params);
+    }
+    const result = await pool.query(query, params);
+    if (process.env.DEBUG_SQL === 'true') {
+      console.log(`Deleted: ${result.rowCount} row(s)`);
+    }
+    return result.rowCount;
+  }
+
+  // --- Insert helpers used by ServerLogic (accept a client to participate in a transaction)
+  async createOrder(client, { timeOfOrder = new Date(), name = '', paymentType = 'Card', price = 0, cashierID = null, customerID = null, delivered = false } = {}) {
+    /**
+     * Insert an order header row within an existing transaction.
+     * @param {Object} client - Transaction client.
+     * @param {Object} payload
+     * @returns {Promise&lt;Object>} Newly created order row.
+     */
+    const q = `INSERT INTO orders(timeOfOrder, name, paymentType, price, delivered, cashierID, customerID) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`;
+    const res = await client.query(q, [timeOfOrder, name, paymentType, price, delivered, cashierID, customerID]);
+    return res.rows[0];
+  }
+
+  async createLineItem(client, { orderID, itemType, quantity = 1, price = 0 } = {}) {
+    /**
+     * Insert a line item associated with an order.
+     * @param {Object} client
+     * @param {Object} payload
+     * @returns {Promise&lt;Object>} Newly created line item row.
+     */
+    const q = `INSERT INTO lineItems(orderID, itemType, quantity, price) VALUES ($1,$2,$3,$4) RETURNING *`;
+    const res = await client.query(q, [orderID, itemType, quantity, price]);
+    return res.rows[0];
+  }
+
+  async createMealItem(client, { lineItemID, menuID, quantity = 1 } = {}) {
+    /**
+     * Insert a meal item tied to a line item.
+     * @param {Object} client
+     * @param {Object} payload
+     * @returns {Promise&lt;Object>} Newly created meal item row.
+     */
+    const q = `INSERT INTO mealItems(lineItemID, menuID, quantity) VALUES ($1,$2,$3) RETURNING *`;
+    const res = await client.query(q, [lineItemID, menuID, quantity]);
+    return res.rows[0];
+  }
+
+
+  /**
+   * Find a customer by email using the provided client (transaction-aware)
+   * @param {Object} client - DB client/connection
+   * @param {string} email - customer email
+   * @returns {Promise&lt;Object|null>} customer row or null
+   */
+  async findCustomerByEmail(client, email) {
+    /**
+     * Lookup a customer by email within a transaction.
+     * @param {Object} client
+     * @param {string} email
+     * @returns {Promise&lt;Object|null>} Customer row or null.
+     */
+    const q = `SELECT * FROM customers WHERE email = $1 LIMIT 1`;
+    const res = await client.query(q, [email]);
+    return res.rows[0] || null;
+  }
+
+  /**
+   * Create a new customer row
+   * @param {Object} client - DB client/connection
+   * @param {string} email - customer email
+   * @returns {Promise&lt;Object>} created customer row
+   */
+  async createCustomer(client, email, name = '') {
+    /**
+     * Create a customer with the given email.
+     * @param {Client} client
+     * @param {string} email
+     * @param {string} [name]
+     * @returns {Promise&lt;Object>} Created customer row.
+     */
+    const q = `INSERT INTO customers(email) VALUES ($1) RETURNING *`;
+    const res = await client.query(q, [email]);
+    return res.rows[0];
+  }
+
+  /**
+   * Add points to an existing customer
+   * @param {Object} client - DB client/connection
+   * @param {number} customerID - ID of customer
+   * @param {number} points - points to add (can be negative)
+   * @returns {Promise&lt;Object>} updated customer row
+   */
+  async addCustomerPoints(client, customerID, points) {
+    /**
+     * Adjust a customer's points balance.
+     * @param {Object} client
+     * @param {number} customerID
+     * @param {number} points - Positive to add, negative to deduct.
+     * @returns {Promise&lt;Object>} Updated customer row.
+     */
+    const q = `UPDATE customers SET points = points + $1 WHERE id = $2 RETURNING *`;
+    const res = await client.query(q, [points, customerID]);
+    return res.rows[0];
+  }
+
+  async updateInventoryStock(client, inventoryID, quantityToDeduct) {
+    /**
+     * Reduce inventory stock by a quantity.
+     * @param {Object} client
+     * @param {number} inventoryID
+     * @param {number} quantityToDeduct
+     * @returns {Promise&lt;Object>} Updated inventory row.
+     */
+    const q = `
+      UPDATE inventory 
+      SET stock = stock - $1 
+      WHERE id = $2 
+      RETURNING *;
+    `;
+    const res = await client.query(q, [quantityToDeduct, inventoryID]);
+    return res.rows[0];
+  }
+
+  async getMenuIngredients(client, menuID) {
+    /**
+     * Retrieve ingredient mappings for a menu item.
+     * @param {Object} client
+     * @param {number} menuID
+     * @returns {Promise&lt;Array&lt;Object>>} Ingredient rows.
+     */
+    const q = `
+      SELECT 
+        mi.inventory_id,
+        mi.quantity,
+        i.itemName
+      FROM menuIngredients mi
+      JOIN inventory i ON mi.inventory_id = i.id
+      WHERE mi.menu_id = $1;
+    `;
+    const res = await client.query(q, [menuID]);
+    return res.rows;
+  }
+
+
+  // Reports for getReportList
+
+  // Report 1: Total Sales
+  async totalSales() {
+    console.log("Fetching: Total sales");
+    const result = await pool.query(`
+      SELECT SUM(price) AS totalRevenue
+      FROM orders;
+    `);
+    console.log("Retrieved: Total sales");
+    return result.rows;
+  }
+
+  // Report 2: Cashier Weekly Pay
+  async cashierWeeklyPay() {
+    console.log("Fetching: Cashier weekly pay");
+    const result = await pool.query(`
+      SELECT cashierName, workingHours * payRate AS weeklyPay
+      FROM cashiers
+      WHERE isActive = TRUE;
+    `);
+    console.log("Retrieved: Cashier weekly pay");
+    return result.rows;
+  }
+
+  // Report 3: Average Order Total By Week
+  async avgOrderTotalByWeek() {
+    console.log("Fetching: Average order total by week");
+    const result = await pool.query(`
+      SELECT DATE_PART('week', timeOfOrder) AS week_num,
+       ROUND(AVG(price), 2) AS avgOrderTotal
+      FROM orders
+      GROUP BY week_num
+      ORDER BY week_num;
+    `);
+    console.log("Retrived: Average order total by week");
+    return result.rows;
+  }
+
+  // Report 4: Average Items Per Order
+  async avgItemsPerOrder() {
+    console.log("Fetching: Average items per order");
+    const result = await pool.query(`
+      SELECT ROUND(AVG(item_count), 2) AS avgItemsPerOrder
+      FROM (
+          SELECT orderID, SUM(quantity) AS item_count
+          FROM lineItems
+          GROUP BY orderID
+      ) sub;
+    `);
+    console.log("Retrieved: Average items per order retrieved");
+    return result.rows;
+  }
+
+  // Report 5: Busiest Cashiers
+  async busiestCashiers() {
+    console.log("Fetching: Busiest cashiers");
+    const result = await pool.query(`
+      SELECT c.cashierName, COUNT(o.id) AS totalOrders
+      FROM orders o
+      JOIN cashiers c ON o.cashierID = c.id
+      GROUP BY c.cashierName
+      ORDER BY totalOrders DESC;
+    `);
+    console.log("Retrived: Busiest cashiers");
+    return result.rows;
+  }
+
+  // Report 6: Number of Inventory Items Per Menu Item
+  async numInventoryItemsPerMenuItem() {
+    console.log("Fetching: Number of inventory items per menu item");
+    const result = await pool.query(`
+      SELECT m.itemName, COUNT(mi.inventory_id) AS numIngredients
+      FROM menu m
+      JOIN menuIngredients mi ON m.id = mi.menu_id
+      GROUP BY m.itemName
+      ORDER BY numIngredients DESC;
+    `);
+    console.log("Retrieved: Number of inventory items per menu item");
+    return result.rows;
+  }
+
+  // Report 7: Inventory Levels
+  async inventoryLevels() {
+    console.log("Fetching: Inventory Levels");
+    const result = await pool.query(`
+      SELECT 
+        itemName,
+        stock,
+        targetStock,
+        (stock - targetStock) AS difference,
+        CASE 
+            WHEN stock &lt; targetStock THEN 'Below Target'
+            WHEN stock = targetStock THEN 'At Target'
+            ELSE 'Above Target'
+        END AS status
+      FROM inventory
+      ORDER BY difference;
+    `);
+    console.log("Retrieved: Inventory Levels");
+    return result.rows;
+  }
+
+  // Report 8: Inventory Usage By Month
+  async inventoryUsageByMonth() {
+    console.log("Fetching: Inventory usage by month");
+    const result = await pool.query(`
+      SELECT 
+        TO_CHAR(DATE_TRUNC('month', o.timeOfOrder), 'YYYY-MM') AS month,
+        i.itemName,
+        ROUND(SUM(mi.quantity * ing.quantity), 2) AS totalUsed
+      FROM orders o
+      JOIN lineItems li ON o.id = li.orderID
+      JOIN mealItems mi ON li.itemID = mi.lineItemID
+      JOIN menuIngredients ing ON mi.menuID = ing.menu_id
+      JOIN inventory i ON ing.inventory_id = i.id
+      GROUP BY month, i.itemName
+      ORDER BY month, totalUsed DESC;
+    `);
+    console.log("Retrieved: Inventory usage by month");
+    return result.rows;
+  }
+
+  // Report 9: Payroll Summary (All Employees) (NOT ON LIST)
+  async payrollSummary() {
+    console.log("Fetching: Payroll summary for all employees");
+    const managerRes = await pool.query(`
+      SELECT managerName,
+       totalHours,
+       payRate,
+       (totalHours * payRate) AS totalPay,
+       payDate
+      FROM managers
+      ORDER BY totalPay DESC;
+    `);
+
+    const cashierRes = await pool.query(`
+      SELECT cashierName,
+        totalHours,
+        payRate,
+        (totalHours * payRate) AS totalPay,
+        payDate
+      FROM cashiers
+      ORDER BY totalPay DESC;
+    `);
+
+      console.log("Retrieved: Payroll summary for all employees");
+    return {
+      managers: managerRes.rows,
+      cashiers: cashierRes.rows
+    };
+
+  }
+
+  // Report 10: Payroll Summary - Managers
+  async payrollSummaryManagers() {
+    console.log("Fetching: Payroll summary for all managers");
+    const result = await pool.query(`
+      SELECT managerName,
+       totalHours,
+       payRate,
+       (totalHours * payRate) AS totalPay,
+       payDate::date
+      FROM managers
+      ORDER BY totalPay DESC;
+    `);
+    console.log("Retrived: Payroll summary for all managers");
+    return result.rows;
+  }
+
+  // Report 11: Payroll Summary - Cashiers
+  async payrollSummaryCashiers() {
+    console.log("Fetching: Payroll summary for all cashiers");
+    const result = await pool.query(`
+      SELECT cashierName,
+        totalHours,
+        payRate,
+        (totalHours * payRate) AS totalPay,
+        payDate::date
+      FROM cashiers
+      ORDER BY totalPay DESC;
+    `);
+    console.log("Retrived: Payroll summary for all cashiers");
+    return result.rows;
+  }
+
+  // Report 12: Sales History By Hour
+  async salesHistoryByHour() {
+    console.log("Fetching: Sales history by hour");
+    const result = await pool.query(`
+      SELECT DATE_PART('hour', timeOfOrder) AS orderHour,
+        COUNT(*) AS numOrders,
+        ROUND(SUM(price), 2) AS totalRevenue
+      FROM orders
+      GROUP BY orderHour
+      ORDER BY totalRevenue DESC;
+    `);
+    console.log("Retrieved: Sales history by hour");
+    return result.rows;
+  }
+
+  // Report 13: Sales History By Week
+  async salesHistoryByWeek() {
+    console.log("Fetching: Sales history by week");
+    const result = await pool.query(`
+      SELECT DATE_PART('week', timeOfOrder) AS orderWeek,
+        COUNT(*) AS numOrders,
+        ROUND(SUM(price), 2) AS totalRevenue
+      FROM orders
+      GROUP BY orderWeek
+      ORDER BY orderWeek;
+    `);
+    console.log("Retrieved: Sales history by week");
+    return result.rows;
+  }
+
+  // Report 14: Ten Peak Days
+  async tenPeakDays() {
+    console.log("Fetching: Ten peak days");
+    const result = await pool.query(`
+      SELECT 
+        timeOfOrder::date AS orderDate,
+        COUNT(*) AS totalOrders,
+        SUM(price) AS totalRevenue
+      FROM orders
+      GROUP BY DATE(timeOfOrder)
+      ORDER BY totalRevenue DESC
+      LIMIT 10;
+    `);
+    console.log("Retrieved: Ten peak days");
+    return result.rows;
+  }
+
+  // Report 15: Top Ten Menu Items
+  async topTenMenuItems() {
+    console.log("Fetching: Top ten menu items");
+    const result = await pool.query(`
+      SELECT m.itemName,
+        ROUND(SUM(mi.quantity), 2) AS totalSold
+      FROM mealItems mi
+      JOIN menu m ON mi.menuID = m.id
+      GROUP BY m.itemName
+      ORDER BY totalSold DESC
+      LIMIT 10;
+    `);
+    console.log("Retrieved: Top top menu items");
+    return result.rows;
+  }
+
+  // Report 16: Total Sales By Payment Type
+  async totalSalesByPaymentType() {
+    console.log("Fetching: Total sales by payment type");
+    const result = await pool.query(`
+      SELECT paymentType,
+        COUNT(*) AS totalOrders,
+        ROUND(SUM(price), 2) AS totalRevenue
+      FROM orders
+      GROUP BY paymentType
+      ORDER BY totalRevenue DESC;
+    `);
+    console.log("Retrieved: Total sales by payment type");
+    return result.rows;
+  }
+
+  // Report 17: Active/Inactive Cashiers
+  async activeInactiveCashiers() {
+    console.log("Fetching: Active cashiers");
+
+    const result = await pool.query(`
+      SELECT isActive, COUNT(*) AS count
+      FROM cashiers
+      GROUP BY isActive;
+    `);
+
+    console.log("Retrieved: Active cashiers");
+    return result.rows;
+  }
+
+  // Report 18: Active/Inactive Managers
+  async activeInactiveManagers() {
+    console.log("Fetching: active managers");
+
+    const result = await pool.query(`
+      SELECT isActive, COUNT(*) AS count
+      FROM managers
+      GROUP BY isActive;
+    `);
+
+    console.log("Retrieved: Active managers");
+    return result.rows;
+  }
+
+  // Report 19: Active/Inactive Employees (Both)
+  async activeInactiveEmployees() {
+    console.log("Fetching: Active employees");
+
+    const cashierRes = await pool.query(`
+      SELECT isActive, COUNT(*) AS count
+      FROM cashiers
+      GROUP BY isActive;
+    `);
+
+    const managerRes = await pool.query(`
+      SELECT isActive, COUNT(*) AS count
+      FROM managers
+      GROUP BY isActive;
+    `);
+
+    console.log("Retrieved: Active employees");
+    return {
+      cashiers: cashierRes.rows,
+      managers: managerRes.rows
+    };
+  }
+
+  // Report 20 - 24: Use genericTableGet (menu, cashiers, managers, inventory) (orders not on list)
+
+  // Report 25: Last Order
+  async getLastOrder() {
+
+    console.log("Fetching: Last order");
+
+    const result = await pool.query(
+      "SELECT * FROM orders ORDER BY timeOfOrder DESC LIMIT 1;"
+    )
+
+    console.log("Retrieved: Last order ");
+
+    return result.rows;
+  }
+
+  // Report 26: Menu Ingredients (Not On List)
+  // get Menu Ingredients for all menu Items
+  async getMenuIngredientsAll() {
+    console.log("Fetching: Menu ingredients");
+    const result = await pool.query(`
+      SELECT 
+        m.itemName AS menu_item,
+        json_agg(
+          json_build_object(
+            'ingredient', i.itemName,
+            'quantity', mi.quantity
+          )
+        ) AS ingredients
+      FROM 
+        menuIngredients mi
+      JOIN 
+        menu m ON mi.menu_id = m.id
+      JOIN 
+        inventory i ON mi.inventory_id = i.id
+      GROUP BY 
+        m.itemName
+      ORDER BY 
+        m.itemName;`
+      );
+    console.log("Retrieved: Menu ingredients");
+    return result.rows;
+  }
+
+  // Report 27: Master Orders (Not On List)
+  // Function to return all orders connected with the mealItems and lineItems tables
+  async getOrdersMaster() {
+    console.log("Fetching: Master list of orders");
+
+    const result = await pool.query(`
+      WITH meal_agg AS (
+      SELECT
+          mi.lineItemID,
+          JSON_AGG(
+              JSON_BUILD_OBJECT(
+                  'meal_item_id', mi.id,
+                  'meal_item_name', m2.itemName,
+                  'meal_item_quantity', mi.quantity,
+                  'meal_item_price', m2.price,
+                  'meal_item_total', mi.quantity * m2.price
+              )
+          ) AS meal_items
+      FROM mealItems mi
+      LEFT JOIN menu m2 ON m2.id = mi.menuID
+      GROUP BY mi.lineItemID
+      ),
+
+      line_agg AS (
+          SELECT
+              li.orderID,
+              JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                      'line_item_id', li.itemID,
+                      'line_item_name', m1.itemName,
+                      'line_item_quantity', li.quantity,
+                      'line_item_price', li.price,
+                      'line_item_total', li.quantity * li.price,
+                      'meal_items', COALESCE(ma.meal_items, '[]'::json)
+                  )
+              ) AS line_items
+          FROM lineItems li
+          LEFT JOIN menu m1 ON m1.id = li.itemType
+          LEFT JOIN meal_agg ma ON ma.lineItemID = li.itemID
+          GROUP BY li.orderID
+      )
+
+      SELECT
+          o.id AS order_id,
+          o.timeOfOrder,
+          o.paymentType,
+          o.price AS order_total,
+          o.cashierID,
+          o.delivered,
+          o.name,
+          COALESCE(la.line_items, '[]'::json) AS line_items
+      FROM orders o
+      LEFT JOIN line_agg la ON la.orderID = o.id
+      ORDER BY o.id;`
+    );
+
+    console.log("Retrieved: Master list of orders");
+
+    return result.rows;
+  }
+
+  // Report 28: Incomplete Orders (Not On List)
+  async getIncompleteOrders() {
+    console.log("Fetching: Incomplete orders");
+    const result = await pool.query(`
+      WITH meal_agg AS (
+      SELECT
+          mi.lineItemID,
+          JSON_AGG(
+              JSON_BUILD_OBJECT(
+                  'meal_item_id', mi.id,
+                  'meal_item_name', m2.itemName,
+                  'meal_item_quantity', mi.quantity,
+                  'meal_item_price', m2.price,
+                  'meal_item_total', mi.quantity * m2.price
+              )
+          ) AS meal_items
+      FROM mealItems mi
+      LEFT JOIN menu m2 ON m2.id = mi.menuID
+      GROUP BY mi.lineItemID
+      ),
+
+      line_agg AS (
+          SELECT
+              li.orderID,
+              JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                      'line_item_id', li.itemID,
+                      'line_item_name', m1.itemName,
+                      'line_item_quantity', li.quantity,
+                      'line_item_price', li.price,
+                      'line_item_total', li.quantity * li.price,
+                      'meal_items', COALESCE(ma.meal_items, '[]'::json)
+                  )
+              ) AS line_items
+          FROM lineItems li
+          LEFT JOIN menu m1 ON m1.id = li.itemType
+          LEFT JOIN meal_agg ma ON ma.lineItemID = li.itemID
+          GROUP BY li.orderID
+      )
+
+      SELECT
+          o.id AS order_id,
+          o.timeOfOrder,
+          o.paymentType,
+          o.price AS order_total,
+          o.cashierID,
+          o.delivered,
+          o.name,
+          DATE_TRUNC('second', NOW() - o.timeOfOrder) AS timeElapsed,
+          COALESCE(la.line_items, '[]'::json) AS line_items
+      FROM orders o
+      LEFT JOIN line_agg la ON la.orderID = o.id
+      WHERE delivered=false
+      ORDER BY timeElapsed DESC;`);
+    console.log("Retrieved: Incomplete orders");
+    return result.rows;
+
+  }
+
+  // Report 29: Today's Orders
+  async getTodaysOrders() {
+    console.log("Fetching: Todays orders");
+    const result = await pool.query("SELECT * FROM orders WHERE timeOfOrder::date=NOW()::date ORDER BY timeOfOrder DESC;");
+    console.log("Retrieved: Todays orders");
+    return result.rows;
+  }
+
+  // Report 30: Product Usage Report
+  async generateProductUsageReport(from = null, to = null) {
+    /**
+     * Compute total quantity used per inventory item for a date range.
+     * @param {string|Date|null} from
+     * @param {string|Date|null} to
+     * @returns {Promise&lt;Array&lt;{itemname:string,totalquantity:number}>>}
+     */
+    console.log("🔄 Generating Product Usage Report");
+    console.log("   Date params:", from, to);
+
+    let fromDateStr = formatDate(from);
+    let toDateStr = formatDate(to);
+    
+    // Default to wide range if no dates
+    if (!fromDateStr &amp;&amp; !toDateStr) {
+      fromDateStr = '1970-01-01 00:00:00';
+      toDateStr = '2099-12-31 23:59:59';
+    } else if (!fromDateStr) {
+      fromDateStr = '1970-01-01 00:00:00';
+    } else if (!toDateStr) {
+      toDateStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    }
+
+    console.log("   Formatted dates:", fromDateStr, toDateStr);
+
+    const result = await pool.query(`
+      SELECT 
+        i.itemname,
+        COALESCE(SUM(mi.quantity * mi2.quantity), 0) as totalquantity
+      FROM inventory i
+      LEFT JOIN menuingredients mi2 ON i.id = mi2.inventory_id
+      LEFT JOIN mealitems mi ON mi2.menu_id = mi.menuid
+      LEFT JOIN lineitems li ON mi.lineitemid = li.itemid
+      LEFT JOIN orders o ON li.orderid = o.id
+      WHERE ($1::timestamp IS NULL OR o.timeoforder >= $1::timestamp)
+        AND ($2::timestamp IS NULL OR o.timeoforder &lt;= $2::timestamp)
+      GROUP BY i.id, i.itemname
+      HAVING COALESCE(SUM(mi.quantity * mi2.quantity), 0) > 0
+      ORDER BY totalquantity DESC, i.itemname;
+    `, [fromDateStr, toDateStr]);
+
+    console.log("✅ Product Usage Report generated");
+    return result.rows;
+  }
+
+  // Report 31: Sales Report
+  async generateSalesReport(from = null, to = null) {
+    /**
+     * Compute total revenue per menu item for a date range.
+     * @param {string|Date|null} from
+     * @param {string|Date|null} to
+     * @returns {Promise&lt;Array&lt;{itemname:string,totalrevenue:number}>>}
+     */
+    console.log("🔄 Generating Sales Report");
+    console.log("   Date params:", from, to);
+
+    let fromDateStr = formatDate(from);
+    let toDateStr = formatDate(to);
+    
+    if (!fromDateStr &amp;&amp; !toDateStr) {
+      fromDateStr = '1970-01-01 00:00:00';
+      toDateStr = '2099-12-31 23:59:59';
+    } else if (!fromDateStr) {
+      fromDateStr = '1970-01-01 00:00:00';
+    } else if (!toDateStr) {
+      toDateStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    }
+
+    console.log("   Formatted dates:", fromDateStr, toDateStr);
+
+    const result = await pool.query(`
+      SELECT 
+        m.itemname,
+        SUM(li.price * li.quantity) AS totalrevenue
+      FROM orders o
+      JOIN lineitems li ON o.id = li.orderid
+      JOIN menu m ON li.itemtype = m.id
+      WHERE ($1::timestamp IS NULL OR o.timeoforder >= $1::timestamp)
+        AND ($2::timestamp IS NULL OR o.timeoforder &lt;= $2::timestamp)
+      GROUP BY m.itemname
+      ORDER BY totalrevenue DESC;
+    `, [fromDateStr, toDateStr]);
+
+    console.log("✅ Sales Report generated");
+    return result.rows;
+  }
+
+  // Report 32: X Report
+  async generateXReport() {
+    return await this.specialReports.generateXReport();
+  }
+
+  // Report 33: Z Report
+  async generateZReport() {
+    return await this.specialReports.generateZReport();
+  }
+
+  // Returns the Order using the ID where delivered is false
+  async getIncompleteOrderById(orderId) {
+    /**
+     * Retrieve an order by id with line and meal item aggregation.
+     * Includes elapsed time and delivered flag.
+     * @param {number} orderId
+     * @returns {Promise&lt;Array&lt;Object>>} Rows for the requested order.
+     */
+    console.log("Fetching: Incomplete orders");
+    const result = await pool.query(`
+      WITH meal_agg AS (
+      SELECT
+          mi.lineItemID,
+          JSON_AGG(
+              JSON_BUILD_OBJECT(
+                  'meal_item_id', mi.id,
+                  'meal_item_name', m2.itemName,
+                  'meal_item_quantity', mi.quantity,
+                  'meal_item_price', m2.price,
+                  'meal_item_total', mi.quantity * m2.price
+              )
+          ) AS meal_items
+      FROM mealItems mi
+      LEFT JOIN menu m2 ON m2.id = mi.menuID
+      GROUP BY mi.lineItemID
+      ),
+
+      line_agg AS (
+          SELECT
+              li.orderID,
+              JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                      'line_item_id', li.itemID,
+                      'line_item_name', m1.itemName,
+                      'line_item_quantity', li.quantity,
+                      'line_item_price', li.price,
+                      'line_item_total', li.quantity * li.price,
+                      'meal_items', COALESCE(ma.meal_items, '[]'::json)
+                  )
+              ) AS line_items
+          FROM lineItems li
+          LEFT JOIN menu m1 ON m1.id = li.itemType
+          LEFT JOIN meal_agg ma ON ma.lineItemID = li.itemID
+          GROUP BY li.orderID
+      )
+
+      SELECT
+          o.id AS order_id,
+          o.timeOfOrder,
+          o.paymentType,
+          o.price AS order_total,
+          o.cashierID,
+          o.delivered,
+          o.name,
+          DATE_TRUNC('second', NOW() - o.timeOfOrder) AS timeElapsed,
+          COALESCE(la.line_items, '[]'::json) AS line_items
+      FROM orders o
+      LEFT JOIN line_agg la ON la.orderID = o.id
+      WHERE id=$1
+      ORDER BY timeElapsed DESC;`, [orderId]);
+    console.log("Retrieved: Incomplete orders");
+    return result.rows;
+
+  }
+
+  async getLastNOrders(numOrders) {
+    /**
+     * Retrieve the most recent N orders.
+     * @param {number} numOrders - Limit count.
+     * @returns {Promise&lt;Array&lt;Object>>} Recent order rows.
+     */
+
+    console.log("Fetching: Last " + numOrders + " order(s)");
+
+    const result = await pool.query(
+      "SELECT * FROM orders ORDER BY timeOfOrder DESC LIMIT $1;",
+      [numOrders]
+    )
+
+    console.log("Retrieved: Last " + numOrders + " order(s)");
+
+    return result.rows;
+  }
+
+
+
+   // Possibly don't need
+  async getOrdersWithCashier() {
+    /**
+     * Retrieve orders joined with cashier names.
+     * @returns {Promise&lt;Array&lt;Object>>} Orders with cashierName.
+     */
+    console.log("Fetching: Orders with cashierName");
+    const result = await pool.query("SELECT o.*, c.cashierName FROM orders o JOIN cashiers c ON o.cashierid=c.id ORDER BY o.id ASC;");
+    console.log("Retrived: Orders with cashierName");
+    return result.rows;
+  }
+
+  // (TODO) Get mealItems elements joined with all respective tables
+  async getMealItemsMaster() {
+    /**
+     * Retrieve meal items with related menu and line item info.
+     * @returns {Promise&lt;Array&lt;Object>>} Meal item master rows.
+     */
+    console.log("Fetching master list of meal items");
+    const result = await pool.query(`
+      SELECT 
+        mi.id AS mealItemID,
+        li.orderID,
+        mi.lineItemID,
+        menuLine.itemName,
+        mi.menuID,
+        menuMeal.itemName,
+        mi.quantity
+      FROM mealItems mi
+      LEFT JOIN lineItems li
+          ON li.itemID=mi.lineItemID
+      LEFT JOIN menu menuLine
+          ON menuLine.id=li.itemType
+      LEFT JOIN menu menuMeal
+          ON menuMeal.id=mi.menuID
+      ORDER BY 
+          mealItemID ASC,
+          li.itemID ASC;
+    `);
+    console.log("Retrieved: Master list of meal items");
+    return result.rows;
+  }
+
+  // (TODO) get lineItems elements joined with all respective tables
+  async getLineItemsMaster() {
+    /**
+     * Retrieve line items joined with menu details.
+     * @returns {Promise&lt;Array&lt;Object>>} Line item master rows.
+     */
+    console.log("Fetching: Master list of line items");
+    const result = await pool.query(`
+      SELECT
+        li.itemID,
+        li.orderID,
+        li.itemType,
+        m.itemName,
+        li.quantity,
+        li.price
+      FROM lineItems li
+      LEFT JOIN menu m
+          ON m.id=li.itemType
+      ORDER BY
+          li.itemID ASC,
+          li.orderID ASC;
+    `);
+    console.log("Retrived: Master list of line items");
+    return result.rows;
+  }
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

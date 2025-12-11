@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: scripts/requestTest.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: scripts/requestTest.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>#!/usr/bin/env node
+/**
+ * requestTest.js
+ * Test script for API endpoints
+ */
+
+import { ClientConnection } from '../employee-side/clientConnection.js';
+
+// Allow overriding API base via CLI arg --base &lt;url> or env API_BASE_URL
+function getBaseFromArgs() {
+  const idx = process.argv.indexOf('--base');
+  if (idx !== -1 &amp;&amp; process.argv[idx + 1]) {
+    return process.argv[idx + 1];
+  }
+  return process.env.API_BASE_URL || null;
+}
+
+const client = new ClientConnection(getBaseFromArgs() || undefined);
+// Parse an optional --order &lt;id> CLI arg
+function getOrderIdFromArgs() {
+  const idx = process.argv.indexOf('--order');
+  if (idx !== -1 &amp;&amp; process.argv[idx + 1]) {
+    const v = Number(process.argv[idx + 1]);
+    return Number.isFinite(v) ? v : null;
+  }
+  return null;
+}
+
+// ============================================================================
+// TEST SUITES
+// ============================================================================
+
+async function runReportTests(reportId = null) {
+  if (reportId === null) {
+    // If no specific report, show the list
+    const reports = await client.getReportList();
+    console.log(JSON.stringify(reports, null, 2));
+  } else {
+    // Run specific report by ID
+    const report = await client.getReport(reportId);
+    console.log(JSON.stringify(report, null, 2));
+  }
+}
+
+async function runXReportTests() {
+  console.log('📊 Testing X Report (Report 32)...\n');
+  
+  // Test 1: X Report (no parameters needed)
+  console.log('Test 1: X Report - Current day sales');
+  try {
+    const report = await client.getReport(32);
+    console.log('✅ X Report successful:');
+    console.log(JSON.stringify(report, null, 2));
+  } catch (error) {
+    console.error('❌ X Report failed:', error.message || error);
+    if (error.body) {
+      console.error('   Error details:', JSON.stringify(error.body, null, 2));
+    }
+  }
+  
+  console.log('\n');
+}
+
+async function runLoginTests() {
+  const validLogin = await client.validateEmployeeLogin({
+    username: 'rbrown',
+    password: 'dr8PWZ8k1_',
+    role: 1
+  });
+  console.log(JSON.stringify(validLogin, null, 2));
+  
+  const invalidUser = await client.validateEmployeeLogin({
+    username: 'nonexistent',
+    password: 'password',
+    role: 1
+  });
+  console.log(JSON.stringify(invalidUser, null, 2));
+  
+  const invalidPass = await client.validateEmployeeLogin({
+    username: 'rbrown',
+    password: 'wrongpassword',
+    role: 1
+  });
+  console.log(JSON.stringify(invalidPass, null, 2));
+  
+  const inactive = await client.validateEmployeeLogin({
+    username: 'chamilton',
+    password: 'Me0j8V*d#w',
+    role: 1
+  });
+  console.log(JSON.stringify(inactive, null, 2));
+}
+
+async function runSchemaTests() {
+  const cashierSchema = await client.getTableSchema('cashiers');
+  console.log(JSON.stringify(cashierSchema, null, 2));
+  
+  const allSchemas = await client.getTableSchema();
+  console.log(JSON.stringify(allSchemas, null, 2));
+}
+
+async function runTableGetTests() {
+  const all = await client.genericTableGet({ table: 'cashiers' });
+  console.log(JSON.stringify(all, null, 2));
+  
+  const columns = await client.genericTableGet({
+    table: 'cashiers',
+    columns: ['cashiername', 'payrate']  // Use lowercase column names
+  });
+  console.log(JSON.stringify(columns, null, 2));
+  
+  const one = await client.genericTableGet({ table: 'cashiers', id: 1 });
+  console.log(JSON.stringify(one, null, 2));
+}
+
+async function runTableSetTests() {
+  const updated = await client.genericTableSet({
+    table: 'cashiers',
+    column: 'workinghours',  // Use lowercase
+    value: 30,
+    id: 1
+  });
+  console.log(JSON.stringify(updated, null, 2));
+}
+
+async function runTableAdderTests() {
+  console.log('ℹ️ genericTableAdder has been removed from client; skipping test.');
+}
+
+async function runTableCreateTests() {
+  const created = await client.genericTableCreate({
+    table: 'cashiers',
+    values: {
+      cashiername: 'Danny',
+      username: 'danny',
+      _password: 'lin',
+      workinghours: 0,
+      totalhours: 0,
+      payrate: 15.00,
+      paydate: '2025-11-07',
+      isactive: true,
+      email: 'lindanny75@tamu.edu'
+    }
+  });
+  console.log(JSON.stringify(created, null, 2));
+}
+
+async function runCreateOrderTests() {
+  const testEmail = 'lindanny75@tamu.edu';
+  
+  console.log('📦 Creating order with email:', testEmail);
+  const order = await client.createOrder({
+    name: 'Test Customer',
+    paymentType: 'Card',
+    cashierID: 1,
+    email: testEmail,
+    wantsReceiptEmail: false,
+    lineItems: [
+      {
+        menuID: 1,
+        quantity: 1,
+        entree: [
+          { menuID: 9, quantity: 1 },
+          { menuID: 20, quantity: 1 }
+        ]
+      },
+      {
+        menuID: 27,
+        quantity: 1
+      }
+    ]
+  }, testEmail, false);
+  
+  console.log('\n✅ Order created:');
+  console.log(JSON.stringify(order, null, 2));
+  
+  // Check if order is associated with customer
+  console.log('\n🔍 Checking order association...');
+  const orderDetails = await client.genericTableGet({ 
+    table: 'orders', 
+    id: order.orderID 
+  });
+  
+  if (orderDetails &amp;&amp; orderDetails.length > 0) {
+    const orderData = orderDetails[0];
+    console.log('📋 Order details:');
+    console.log(`   Order ID: ${orderData.id}`);
+    console.log(`   Customer ID: ${orderData.customerid || 'NULL (not associated)'}`);
+    console.log(`   Price: $${orderData.price}`);
+    
+    if (orderData.customerid) {
+      console.log('   ✅ Order is associated with customer!');
+      
+      // Check customer details
+      console.log('\n👤 Checking customer details...');
+      const customerDetails = await client.genericTableGet({ 
+        table: 'customers', 
+        id: orderData.customerid 
+      });
+      
+      if (customerDetails &amp;&amp; customerDetails.length > 0) {
+        const customer = customerDetails[0];
+        console.log('📧 Customer information:');
+        console.log(`   Customer ID: ${customer.id}`);
+        console.log(`   Email: ${customer.email}`);
+        console.log(`   Points: ${customer.points || 0}`);
+        console.log(`   Created At: ${customer.createdat}`);
+        
+        if (customer.email === testEmail) {
+          console.log('   ✅ Customer email matches!');
+        }
+        
+        const expectedPoints = Math.ceil(Number(orderData.price));
+        if (customer.points >= expectedPoints) {
+          console.log(`   ✅ Customer has points (${customer.points} points, expected at least ${expectedPoints})`);
+        } else {
+          console.log(`   ⚠️ Customer points may be incorrect (${customer.points} points, expected at least ${expectedPoints})`);
+        }
+      } else {
+        console.log('   ❌ Customer not found!');
+      }
+    } else {
+      console.log('   ❌ Order is NOT associated with a customer!');
+    }
+  } else {
+    console.log('   ❌ Order not found!');
+  }
+  
+  // Check if customer exists in customer list
+  console.log('\n📋 Checking customer list...');
+  const allCustomers = await client.genericTableGet({ table: 'customers' });
+  const customerInList = allCustomers.find(c => c.email === testEmail);
+  
+  if (customerInList) {
+    console.log('✅ Customer found in customer list:');
+    console.log(JSON.stringify(customerInList, null, 2));
+  } else {
+    console.log('❌ Customer NOT found in customer list!');
+    console.log('Available customers:', allCustomers.map(c => c.email).join(', '));
+  }
+}
+
+async function runTableDeleteTests() {
+  console.log('🗑️ Testing genericTableDelete on cashiers (email test row)');
+  try {
+    // Create a temp row
+    const created = await client.genericTableCreate({
+      table: 'cashiers',
+      values: {
+        cashiername: 'Temp User',
+        username: 'tempuser',
+        _password: 'temp',
+        workinghours: 0,
+        totalhours: 0,
+        payrate: 10.00,
+        paydate: '2025-12-10',
+        isactive: false,
+        email: 'temp@example.com'
+      }
+    });
+    console.log('   ✅ Created temp row:', created?.id);
+
+    // Delete temp row by username
+    const deleted = await client.genericTableDelete({
+      table: 'cashiers',
+      column: 'username',
+      value: 'tempuser'
+    });
+    console.log('   ✅ Deleted rows:', deleted);
+  } catch (err) {
+    console.error('   ❌ Delete test failed:', err.message || err);
+  }
+}
+
+async function runIncompleteOrderTests(orderId) {
+  console.log('🔎 Testing getIncompleteOrderById...', orderId ?? '(auto-select)');
+  try {
+    if (orderId === undefined || orderId === null) {
+      const orders = await client.genericTableGet({ table: 'orders' });
+      const candidate = orders.find(o => o.iscomplete === false || o.iscomplete === 0);
+      orderId = candidate ? candidate.id : orders[0]?.id;
+      console.log('   🧭 Selected orderId:', orderId);
+      if (!orderId) throw new Error('No orders found to test');
+    }
+    const result = await client.getIncompleteOrderById(orderId);
+    console.log('   ✅ Raw response:', JSON.stringify(result, null, 2));
+  } catch (err) {
+    console.error('   ❌ Incomplete order test failed:', err.message || err);
+    if (err.body) console.error('   Body:', JSON.stringify(err.body, null, 2));
+  }
+}
+
+// ============================================================================
+// AUTHENTICATION HELPER
+// ============================================================================
+
+/**
+ * Authenticate as a manager to get database access
+ * Uses the same credentials as runLoginTests for consistency
+ */
+async function authenticate(client) {
+  console.log('🔐 Authenticating as manager...');
+  const candidates = [
+    { username: 'manager', password: 'pass', role: 1 }
+  ];
+
+  for (const creds of candidates) {
+    try {
+      const loginResult = await client.validateEmployeeLogin(creds);
+      if (loginResult &amp;&amp; loginResult.success) {
+        console.log('✅ Authentication successful:', loginResult.employee?.name || loginResult.employee?.username);
+        return loginResult;
+      } else {
+        console.log(`⚠️ Auth failed for ${creds.username}: ${loginResult?.message || 'Unknown error'}`);
+      }
+    } catch (e) {
+      console.log(`⚠️ Auth request error for ${creds.username}: ${e.message || e}`);
+    }
+  }
+
+  const err = new Error('Authentication failed for all candidates');
+  err.name = 'AuthError';
+  throw err;
+}
+
+// ============================================================================
+// MAIN EXECUTION
+// ============================================================================
+
+(async () => {
+  try {
+    // Authenticate first to get database access
+    await authenticate(client);
+    
+    // Uncomment the test suite you want to run:
+    
+    //await runReportTests(32);   
+    //await runReportTests();      // Show report list
+    //await runLoginTests();
+    //await runSchemaTests(); // gets structure of tables
+    //await runTableGetTests();
+    //await runTableSetTests();
+    //await runTableDeleteTests();
+    //await runTableCreateTests();
+    //await runTableDeleteTests();
+    //await runCreateOrderTests();
+    //await runXReportTests();  // Test X Report (Report 32)
+    
+  } catch (err) {
+    console.error('❌ Error:', err.message || err);
+    if (err.status) console.error('Status:', err.status);
+    if (err.body) console.error('Body:', err.body);
+    process.exit(1);
+  }
+})();
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server-side/googleAuth.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server-side/googleAuth.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * Google OAuth integration utilities.
+ *
+ * Responsibilities:
+ * - Verify tokens received from the client with the provider.
+ * - Look up matching application user accounts by email.
+ * - Return normalized identity data for session creation.
+ */
+/**
+ * Google OAuth Token Verification
+ * Verifies Google ID tokens and matches them with employees in the database
+ */
+
+import { OAuth2Client } from 'google-auth-library';
+import { ServerLogic } from './serverLogic.js';
+
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+/**
+ * Verify a Google ID token and extract user information
+ * @param {string} token - Google ID token from the client
+ * @returns {Promise&lt;Object>} User information from Google
+ */
+export async function verifyGoogleToken(token) {
+  try {
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    
+    const payload = ticket.getPayload();
+    return {
+      googleId: payload.sub,
+      email: payload.email,
+      name: payload.name,
+      picture: payload.picture,
+    };
+  } catch (error) {
+    console.error('❌ Google token verification failed:', error.message);
+    throw new Error('Invalid Google token');
+  }
+}
+
+/**
+ * Find employee in database by email and verify they exist
+ * @param {string} email - Employee email from Google
+ * @param {ServerLogic} logic - ServerLogic instance
+ * @returns {Promise&lt;Object|null>} Employee information or null if not found
+ */
+export async function findEmployeeByEmail(email, logic) {
+  try {
+    // Helper function to check if email is valid (not null, undefined, or empty string)
+    const isValidEmail = (emailValue) => {
+      return emailValue &amp;&amp; typeof emailValue === 'string' &amp;&amp; emailValue.trim().length > 0;
+    };
+
+    // Try to find in cashiers table
+    const cashiers = await logic.genericTableGet('cashiers', ['id', 'cashiername', 'username', 'email', 'isactive'], null);
+    const cashier = cashiers.find(c => isValidEmail(c.email) &amp;&amp; c.email.toLowerCase().trim() === email.toLowerCase().trim());
+    
+    if (cashier) {
+      return {
+        id: cashier.id,
+        name: cashier.cashiername,
+        username: cashier.username,
+        email: cashier.email,
+        role: 'cashier',
+        isActive: cashier.isactive,
+      };
+    }
+
+    // Try to find in managers table
+    const managers = await logic.genericTableGet('managers', ['id', 'managername', 'username', 'email', 'isactive'], null);
+    const manager = managers.find(m => isValidEmail(m.email) &amp;&amp; m.email.toLowerCase().trim() === email.toLowerCase().trim());
+    
+    if (manager) {
+      return {
+        id: manager.id,
+    /**
+     * Google OAuth helpers.
+     *
+     * Responsibilities:
+     * - Validate and parse Google ID tokens.
+     * - Extract minimal profile fields for session context.
+     * - Return consistent error codes on validation failures.
+     */
+        name: manager.managername,
+        username: manager.username,
+        email: manager.email,
+        role: 'manager',
+        isActive: manager.isactive,
+      };
+    }
+      /**
+       * Verify a Google ID token and return profile info.
+       * @param {string} idToken
+       * @returns {Promise&lt;Object>}
+       */
+
+    return null;
+  } catch (error) {
+    console.error('❌ Error finding employee by email:', error.message);
+    throw error;
+  }
+}
+
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="ClientConnection.html">ClientConnection</a></li><li><a href="DatabaseAccess.html">DatabaseAccess</a></li><li><a href="ServerLogic.html">ServerLogic</a></li><li><a href="SpecialReports.html">SpecialReports</a></li></ul><h3>Global</h3><ul><li><a href="global.html#ChoiceImage">ChoiceImage</a></li><li><a href="global.html#Employees">Employees</a></li><li><a href="global.html#ErrorCodes">ErrorCodes</a></li><li><a href="global.html#FLOW">FLOW</a></li><li><a href="global.html#INACTIVITY_TIMEOUT_MS">INACTIVITY_TIMEOUT_MS</a></li><li><a href="global.html#Inventory">Inventory</a></li><li><a href="global.html#KitchenView">KitchenView</a></li><li><a href="global.html#MEAL_RULES">MEAL_RULES</a></li><li><a href="global.html#MEAL_TYPES">MEAL_TYPES</a></li><li><a href="global.html#Manager">Manager</a></li><li><a href="global.html#Menu">Menu</a></li><li><a href="global.html#PillImage">PillImage</a></li><li><a href="global.html#Reports">Reports</a></li><li><a href="global.html#authenticate">authenticate</a></li><li><a href="global.html#buildMealItems">buildMealItems</a></li><li><a href="global.html#findEmployeeByEmail">findEmployeeByEmail</a></li><li><a href="global.html#formatAppDisplayName">formatAppDisplayName</a></li><li><a href="global.html#formatDrinkDisplayName">formatDrinkDisplayName</a></li><li><a href="global.html#formatReceiptPlain">formatReceiptPlain</a></li><li><a href="global.html#formatSizeDisplayName">formatSizeDisplayName</a></li><li><a href="global.html#getErrorCodeName">getErrorCodeName</a></li><li><a href="global.html#getErrorDescription">getErrorDescription</a></li><li><a href="global.html#getMealTypeFromName">getMealTypeFromName</a></li><li><a href="global.html#getMenuInfo">getMenuInfo</a></li><li><a href="global.html#getRulesForSize">getRulesForSize</a></li><li><a href="global.html#getSizeLabelFromName">getSizeLabelFromName</a></li><li><a href="global.html#getTransporter">getTransporter</a></li><li><a href="global.html#initializeServerLogic">initializeServerLogic</a></li><li><a href="global.html#name">name</a></li><li><a href="global.html#requireAuth">requireAuth</a></li><li><a href="global.html#requireCashier">requireCashier</a></li><li><a href="global.html#requireManager">requireManager</a></li><li><a href="global.html#sendOrderReceipt">sendOrderReceipt</a></li><li><a href="global.html#setupServerConnections">setupServerConnections</a></li><li><a href="global.html#startServer">startServer</a></li><li><a href="global.html#validateMeal">validateMeal</a></li><li><a href="global.html#verifyGoogleToken">verifyGoogleToken</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Dec 10 2025 23:37:16 GMT-0600 (Central Standard Time)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
